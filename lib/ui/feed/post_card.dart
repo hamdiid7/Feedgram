@@ -3,6 +3,12 @@ import 'package:flutter/material.dart';
 import '../../data/app_database.dart';
 import '../../domain/feed_grouping.dart';
 import '../app_scope.dart';
+import '../motion.dart';
+import '../theme.dart';
+import '../widgets/count_number.dart';
+import '../widgets/open_container_navigation.dart';
+import '../widgets/tappable.dart';
+import '../channels/channel_feed_screen.dart';
 import 'media_viewer.dart';
 import 'post_video.dart';
 import 'post_album.dart';
@@ -35,8 +41,16 @@ class PostCard extends StatelessWidget {
         ? PostMedia.decode(message.mediaJson)
         : null;
 
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+    // A rounded tinted container per post, rather than full-width rows split by
+    // dividers. Separation comes from the gap between cards, which survives a
+    // wall of photos where a hairline rule does not.
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 2),
+      decoration: BoxDecoration(
+        color: containerColor(context),
+        borderRadius: BorderRadius.circular(Shapes.card),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -57,7 +71,15 @@ class PostCard extends StatelessWidget {
             ),
             const SizedBox(height: 8),
           ],
-          _Header(channel: channel, message: item.lead.message),
+          _ChannelLine(channel: channel, message: item.lead.message),
+          // Everything below the name is inset past the avatar, so the post reads
+          // as one block hanging off the channel rather than a header sitting on
+          // top of full-width text.
+          Padding(
+            padding: const EdgeInsets.only(left: _contentInset),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
           if (message.forwardedFromChatId != null) ...[
             const SizedBox(height: 6),
             Row(
@@ -103,17 +125,23 @@ class PostCard extends StatelessWidget {
                     : () => _openViewer(context, media),
               ),
           ],
-          const SizedBox(height: 4),
-          _Actions(message: item.lead.message),
-          Divider(height: 1, color: theme.colorScheme.outlineVariant),
+                const SizedBox(height: 4),
+                _Actions(message: item.lead.message),
+              ],
+            ),
+          ),
         ],
       ),
     );
   }
 }
 
-class _Header extends StatelessWidget {
-  const _Header({required this.channel, required this.message});
+/// Avatar column width plus its gap — the inset every part of the post body
+/// shares, so text, media and actions all line up under the channel name.
+const _contentInset = 42.0;
+
+class _ChannelLine extends StatelessWidget {
+  const _ChannelLine({required this.channel, required this.message});
 
   final Channel channel;
   final Message message;
@@ -122,45 +150,74 @@ class _Header extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    return Row(
-      children: [
-        CircleAvatar(
-          radius: 16,
-          backgroundColor: theme.colorScheme.primaryContainer,
-          child: Text(
-            _initials(channel.title),
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.colorScheme.onPrimaryContainer,
-            ),
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                channel.title.isEmpty ? 'Untitled' : channel.title,
-                style: theme.textTheme.titleSmall,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              Text(
-                [
-                  if (channel.username != null) '@${channel.username}',
-                  _relativeTime(message.date),
-                  if (message.editDate != null) 'edited',
-                ].join(' · '),
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
+    // The header is the way into a channel from anywhere in the feed, and it
+    // grows into the profile rather than being replaced by it — the header is
+    // literally a compressed version of that page.
+    //
+    // This replaces a Hero on the avatar. The two cannot coexist: the container
+    // transform keeps the source subtree mounted for the whole flight, so a hero
+    // in it and a matching one on the destination are two live widgets sharing a
+    // tag, which is an assertion failure rather than a nicer animation.
+    return OpenContainerNavigation(
+      borderRadius: Shapes.row,
+      openPage: ChannelFeedScreen(channel: channel),
+      button: (open) => Tappable(
+        onTap: open,
+        borderRadius: Shapes.row,
+        child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          children: [
+            CircleAvatar(
+              radius: 16,
+              backgroundColor: theme.colorScheme.primaryContainer,
+              child: Text(
+                _initials(channel.title),
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: theme.colorScheme.onPrimaryContainer,
                 ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
               ),
-            ],
-          ),
+            ),
+            const SizedBox(width: _contentInset - 32),
+            Expanded(
+              child: Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      channel.title.isEmpty ? 'Untitled' : channel.title,
+                      style: theme.textTheme.titleSmall,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  // Handle without the "@": the name already says whose it is, and
+                  // the sigil is noise at this size.
+                  if (channel.username != null)
+                    Flexible(
+                      child: Text(
+                        channel.username!,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  Text(
+                    ' · ${_relativeTime(message.date)}'
+                    '${message.editDate != null ? ' · edited' : ''}',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
-      ],
+        ),
+      ),
     );
   }
 }
@@ -186,9 +243,18 @@ class _Actions extends StatelessWidget {
                 ? theme.colorScheme.primary
                 : theme.colorScheme.onSurfaceVariant,
           ),
-          icon: Icon(liked ? Icons.favorite : Icons.favorite_border, size: 16),
-          label: Text(
-            message.reactionCount > 0 ? _compact(message.reactionCount) : '',
+          icon: TapBounce(
+            active: liked,
+            child: Icon(liked ? Icons.favorite : Icons.favorite_border, size: 16),
+          ),
+          // Rolls to the new total when a reaction lands, so the count visibly
+          // acknowledges the tap instead of silently being one higher.
+          label: AnimatedSizeSwitcher(
+            child: CountNumber(
+              value: message.reactionCount,
+              builder: (context, value) =>
+                  Text(value > 0 ? _compact(value) : ''),
+            ),
           ),
           onPressed: () async {
             try {
@@ -211,14 +277,11 @@ class _Actions extends StatelessWidget {
             ),
             icon: const Icon(Icons.mode_comment_outlined, size: 16),
             label: Text(_compact(message.replyCount)),
-            onPressed: () => showModalBottomSheet<void>(
-              context: context,
-              isScrollControlled: true,
-              builder: (_) => ThreadSheet(
-                chatId: message.chatId,
-                messageId: message.messageId,
-                replyCount: message.replyCount,
-              ),
+            onPressed: () => openThreadSheet(
+              context,
+              chatId: message.chatId,
+              messageId: message.messageId,
+              replyCount: message.replyCount,
             ),
           ),
         const Spacer(),

@@ -1,8 +1,10 @@
+import 'package:dynamic_color/dynamic_color.dart';
 import 'package:flutter/material.dart';
 
 import 'ui/app_scope.dart';
 import 'ui/auth/auth_gate.dart';
 import 'ui/feed/playback_coordinator.dart';
+import 'ui/theme.dart';
 
 void main() {
   runApp(const FeedgramApp());
@@ -29,12 +31,21 @@ class _FeedgramAppState extends State<FeedgramApp> {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
+    // Wallpaper-derived palette on Android 12+, seeded fallback everywhere else.
+    return DynamicColorBuilder(
+      builder: (lightDynamic, darkDynamic) => MaterialApp(
       title: 'Feedgram',
-      theme: ThemeData(
-        colorSchemeSeed: const Color(0xFF2AABEE),
+      theme: buildTheme(
+        dynamicScheme: lightDynamic,
+        brightness: Brightness.light,
+      ),
+      darkTheme: buildTheme(
+        dynamicScheme: darkDynamic,
         brightness: Brightness.dark,
       ),
+      // Follows the system setting rather than forcing dark, which is what an
+      // Android app is expected to do.
+      themeMode: ThemeMode.system,
       // Anything pushed over the feed — Channels, the debug screens, fullscreen
       // media — must stop inline playback. `VisibilityDetector` does not help
       // here: a covered route keeps its geometry, so items still report as
@@ -47,6 +58,7 @@ class _FeedgramAppState extends State<FeedgramApp> {
       builder: (context, child) =>
           AppScope(playback: _playback, builder: (_) => child!),
       home: const AuthGate(),
+      ),
     );
   }
 }

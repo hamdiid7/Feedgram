@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import '../../data/media_cache.dart';
 import '../../data/media_repository.dart';
 import '../app_scope.dart';
+import '../motion.dart';
 
 /// Media descriptor decoded from `messages.media_json`.
 /// One available resolution of a photo.
@@ -35,6 +36,9 @@ class PostMedia {
     this.variants = const [],
     this.remoteId,
     this.byteSize,
+    this.posterId,
+    this.posterRemoteId,
+    this.streamable = false,
   });
 
   final String type;
@@ -60,6 +64,19 @@ class PostMedia {
 
   /// File size in bytes, when known. Gates video autoplay.
   final int? byteSize;
+
+  /// A real JPEG poster frame, shown whenever a video is not playing. Sharper
+  /// than the 32px minithumbnail, which is what made a paused video look blurred.
+  final int? posterId;
+  final String? posterRemoteId;
+
+  /// TDLib says this file can be played from a partial prefix.
+  final bool streamable;
+
+  /// Reference for the poster image, if there is one.
+  MediaRef? get posterRef => posterId == null
+      ? null
+      : MediaRef(fileId: posterId!, remoteId: posterRemoteId);
 
   /// The smallest variant that still covers [targetWidth] logical pixels.
   ///
@@ -126,6 +143,9 @@ class PostMedia {
       variants: variants,
       remoteId: decoded['remote'] as String?,
       byteSize: decoded['bytes'] as int?,
+      posterId: decoded['posterId'] as int?,
+      posterRemoteId: decoded['posterRemote'] as String?,
+      streamable: decoded['streamable'] as bool? ?? false,
     );
   }
 }
@@ -252,14 +272,19 @@ class _PostMediaBody extends StatelessWidget {
             fit: StackFit.expand,
             children: [
               if (thumb != null)
-                Image.memory(
+                // Shimmers only while the real file is still arriving, so a
+                // placeholder reads as pending rather than as the final image.
+                Shimmer(
+                  enabled: state != null && !(state!.value.isDone),
+                  child: Image.memory(
                   thumb,
                   fit: BoxFit.cover,
                   // The minithumbnail is ~32px wide; letting it scale smoothly
                   // is what makes it read as a blur placeholder rather than a
                   // pixelated mess.
-                  filterQuality: FilterQuality.low,
-                  gaplessPlayback: true,
+                    filterQuality: FilterQuality.low,
+                    gaplessPlayback: true,
+                  ),
                 )
               else
                 ColoredBox(color: theme.colorScheme.surfaceContainerHighest),

@@ -6,6 +6,7 @@ import 'package:handy_tdlib/api.dart' as td;
 import '../telegram/td_exception.dart';
 import '../telegram/telegram_client.dart';
 import 'app_database.dart';
+import 'for_you_repository.dart';
 import 'message_mapping.dart';
 
 /// One feed row: a post plus the channel that published it.
@@ -27,11 +28,16 @@ class FeedCursor {
 /// Backfill, live sync, and the feed queries.
 class MessageRepository {
   MessageRepository({required TelegramClient client, required AppDatabase db})
-      : _client = client,
-        _db = db;
+    : _client = client,
+      _db = db;
 
   final TelegramClient _client;
   final AppDatabase _db;
+
+  /// Set by the app scope. Ranking lives in its own repository, but the counters
+  /// that drive it arrive here, so this is where rescoring has to be triggered
+  /// from.
+  ForYouRepository? forYou;
 
   /// Chats currently open for live push. TDLib pushes `updateNewMessage` only
   /// for open chats, but hundreds of open chats is exactly the pattern that gets
@@ -65,13 +71,15 @@ class MessageRepository {
           emptyRounds < _emptyRoundsBeforeStop) {
         final td.Messages batch;
         try {
-          batch = await _client.send<td.Messages>(td.GetChatHistory(
-            chatId: chatId,
-            fromMessageId: fromMessageId,
-            offset: 0,
-            limit: 100,
-            onlyLocal: false,
-          ));
+          batch = await _client.send<td.Messages>(
+            td.GetChatHistory(
+              chatId: chatId,
+              fromMessageId: fromMessageId,
+              offset: 0,
+              limit: 100,
+              onlyLocal: false,
+            ),
+          );
         } on TdException catch (e) {
           final flood = e.floodWait;
           if (flood != null) {
@@ -100,7 +108,10 @@ class MessageRepository {
 
     if (collected.isEmpty) return 0;
     await _persist(collected.values);
-    await _advanceCursor(chatId, collected.keys.reduce((a, b) => a > b ? a : b));
+    await _advanceCursor(
+      chatId,
+      collected.keys.reduce((a, b) => a > b ? a : b),
+    );
     return collected.length;
   }
 
@@ -119,10 +130,12 @@ class MessageRepository {
     int perChannel = 60,
     void Function(int done, int total)? onProgress,
   }) async {
-    final rows = await _db.customSelect(
-      'SELECT DISTINCT chat_id FROM channel_lists',
-      readsFrom: {_db.channelLists},
-    ).get();
+    final rows = await _db
+        .customSelect(
+          'SELECT DISTINCT chat_id FROM channel_lists',
+          readsFrom: {_db.channelLists},
+        )
+        .get();
     return backfillChannels(
       [for (final row in rows) row.read<int>('chat_id')],
       perChannel: perChannel,
@@ -153,7 +166,86 @@ class MessageRepository {
       onProgress?.call(i + 1, ids.length);
     }
 
+    // Scores are recomputed once per pass, not per channel: `m` is an aggregate
+    // over the whole window and would otherwise be recalculated 150 times.
+    await forYou?.recomputeScores();
+
     return total;
+  }
+
+  /// Fetches only what is *newer* than what we already hold, for pull-to-refresh.
+  ///
+  /// Deliberately not a backfill: it walks forward from `last_synced_message_id`
+  /// and stops as soon as it reaches known ground, so a refresh costs one small
+  /// request per channel rather than re-reading history. Sequential with full
+  /// FLOOD_WAIT sleeps, like every other network pass — a pull-to-refresh across
+  /// 150 channels is exactly where an impatient implementation gets an account
+  /// limited.
+  Future<int> refreshChannels(
+    Iterable<int> chatIds, {
+    int perChannel = 30,
+    void Function(int done, int total)? onProgress,
+  }) async {
+    final ids = chatIds.toList();
+    var fetched = 0;
+
+    for (var i = 0; i < ids.length; i++) {
+      try {
+        fetched += await _refreshChannel(ids[i], limit: perChannel);
+      } on TdException {
+        // One unreachable channel must not fail the whole gesture.
+      }
+      onProgress?.call(i + 1, ids.length);
+    }
+
+    await forYou?.recomputeScores();
+
+    return fetched;
+  }
+
+  Future<int> _refreshChannel(int chatId, {required int limit}) async {
+    final cursor = await (_db.select(
+      _db.channels,
+    )..where((c) => c.id.equals(chatId))).getSingleOrNull();
+
+    await _openChat(chatId);
+    try {
+      final batch = await _client.send<td.Messages>(
+        td.GetChatHistory(
+          chatId: chatId,
+          // 0 means "from the newest", which is what a refresh wants.
+          fromMessageId: 0,
+          offset: 0,
+          limit: limit,
+          onlyLocal: false,
+        ),
+      );
+
+      if (batch.messages.isEmpty) return 0;
+
+      final known = cursor?.lastSyncedMessageId ?? 0;
+      // Only genuinely new posts. Re-persisting known ones would be harmless but
+      // pointless work on every pull.
+      final fresh = batch.messages.where((m) => m.id > known).toList();
+      if (fresh.isEmpty) return 0;
+
+      await _persist(fresh);
+      await _advanceCursor(
+        chatId,
+        fresh.map((m) => m.id).reduce((a, b) => a > b ? a : b),
+      );
+      return fresh.length;
+    } on TdException catch (e) {
+      final flood = e.floodWait;
+      if (flood != null) {
+        // Full duration. A refresh is not urgent enough to justify shortening it.
+        await Future<void>.delayed(flood);
+        return 0;
+      }
+      rethrow;
+    } finally {
+      await _closeChat(chatId);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -175,40 +267,70 @@ class MessageRepository {
 
         // Carries only the new edit timestamp — the replacement content arrives
         // separately as updateMessageContent.
-        case td.UpdateMessageEdited(:final chatId, :final messageId, :final editDate):
-          await (_db.update(_db.messages)
-                ..where((m) => m.chatId.equals(chatId) & m.messageId.equals(messageId)))
+        case td.UpdateMessageEdited(
+          :final chatId,
+          :final messageId,
+          :final editDate,
+        ):
+          await (_db.update(_db.messages)..where(
+                (m) => m.chatId.equals(chatId) & m.messageId.equals(messageId),
+              ))
               .write(MessagesCompanion(editDate: Value(editDate)));
 
-        case td.UpdateMessageContent(:final chatId, :final messageId, :final newContent):
+        case td.UpdateMessageContent(
+          :final chatId,
+          :final messageId,
+          :final newContent,
+        ):
           await _applyEditedContent(chatId, messageId, newContent);
 
-        case td.UpdateDeleteMessages(:final chatId, :final messageIds, :final isPermanent, :final fromCache):
+        case td.UpdateDeleteMessages(
+          :final chatId,
+          :final messageIds,
+          :final isPermanent,
+          :final fromCache,
+        ):
           // `fromCache` means TDLib is only evicting its own copy — the post
           // still exists, so dropping it here would blank rows that are fine.
           if (isPermanent && !fromCache) {
-            await (_db.delete(_db.messages)
-                  ..where((m) => m.chatId.equals(chatId) & m.messageId.isIn(messageIds)))
+            await (_db.delete(_db.messages)..where(
+                  (m) => m.chatId.equals(chatId) & m.messageId.isIn(messageIds),
+                ))
                 .go();
           }
 
-        case td.UpdateMessageInteractionInfo(:final chatId, :final messageId, :final interactionInfo):
-          await (_db.update(_db.messages)
-                ..where((m) => m.chatId.equals(chatId) & m.messageId.equals(messageId)))
-              .write(MessagesCompanion(
-            viewCount: Value(interactionInfo?.viewCount ?? 0),
-            forwardCount: Value(interactionInfo?.forwardCount ?? 0),
-            reactionCount: Value(
-              interactionInfo?.reactions?.reactions
-                      .fold<int>(0, (sum, r) => sum + r.totalCount) ??
-                  0,
-            ),
-            replyCount: Value(interactionInfo?.replyInfo?.replyCount ?? 0),
-            // This is the authoritative answer on our own reaction, and it is
-            // what reconciles the optimistic write in [toggleReaction] —
-            // including a reaction added from another device.
-            chosenReaction: Value(chosenReactionOf(interactionInfo)),
-          ));
+        case td.UpdateMessageInteractionInfo(
+          :final chatId,
+          :final messageId,
+          :final interactionInfo,
+        ):
+          await (_db.update(_db.messages)..where(
+                (m) => m.chatId.equals(chatId) & m.messageId.equals(messageId),
+              ))
+              .write(
+                MessagesCompanion(
+                  viewCount: Value(interactionInfo?.viewCount ?? 0),
+                  forwardCount: Value(interactionInfo?.forwardCount ?? 0),
+                  reactionCount: Value(
+                    interactionInfo?.reactions?.reactions.fold<int>(
+                          0,
+                          (sum, r) => sum + r.totalCount,
+                        ) ??
+                        0,
+                  ),
+                  replyCount: Value(
+                    interactionInfo?.replyInfo?.replyCount ?? 0,
+                  ),
+                  // This is the authoritative answer on our own reaction, and it is
+                  // what reconciles the optimistic write in [toggleReaction] —
+                  // including a reaction added from another device.
+                  chosenReaction: Value(chosenReactionOf(interactionInfo)),
+                ),
+              );
+          // The counters that just changed *are* the ranking inputs, so the score
+          // has to follow them. Uses the cached prior rather than re-aggregating —
+          // these updates arrive constantly while scrolling.
+          await forYou?.rescoreMessage(chatId, messageId);
 
         default:
           break;
@@ -228,14 +350,18 @@ class MessageRepository {
   ) async {
     final fields = contentFieldsOf(content);
 
-    await (_db.update(_db.messages)
-          ..where((m) => m.chatId.equals(chatId) & m.messageId.equals(messageId)))
-        .write(MessagesCompanion(
-      body: Value(fields.text),
-      entitiesJson: Value(fields.entitiesJson),
-      spansJson: Value(fields.spansJson),
-      mediaJson: Value(fields.mediaJson),
-    ));
+    await (_db.update(_db.messages)..where(
+          (m) => m.chatId.equals(chatId) & m.messageId.equals(messageId),
+        ))
+        .write(
+          MessagesCompanion(
+            body: Value(fields.text),
+            entitiesJson: Value(fields.entitiesJson),
+            spansJson: Value(fields.spansJson),
+            mediaJson: Value(fields.mediaJson),
+            contentKind: Value(fields.kind),
+          ),
+        );
   }
 
   Future<void> stopLiveUpdates() async {
@@ -260,9 +386,11 @@ class MessageRepository {
     int? chatId,
     ChannelList list = ChannelList.following,
   }) {
-    return _feedQuery(limit: limit, chatId: chatId, list: list)
-        .watch()
-        .map(_mapRows);
+    return _feedQuery(
+      limit: limit,
+      chatId: chatId,
+      list: list,
+    ).watch().map(_mapRows);
   }
 
   /// Next page, older than [after]. Keyset pagination — `OFFSET` would rescan
@@ -307,12 +435,26 @@ class MessageRepository {
       query.where(_db.messages.chatId.equals(chatId));
     }
 
+    // Content filtering happens here, in SQL, never at insert time — the rules
+    // are expected to change and re-backfilling to revise one would be absurd.
+    // Applies to channel profiles too, so a channel looks the same wherever you
+    // read it.
+    query.where(
+      _db.messages.contentKind.isNotIn([
+        for (final kind in hiddenContentKinds) kind.name,
+      ]),
+    );
+    // Posts pushed through an inline bot: auto-posters, RSS bridges, ads.
+    query.where(_db.messages.viaBot.equals(false));
+
     if (after != null) {
       // Strict tuple comparison on (date, message_id): date alone is not unique,
       // and ties would either repeat or skip rows across page boundaries.
-      query.where(_db.messages.date.isSmallerThanValue(after.date) |
-          (_db.messages.date.equals(after.date) &
-              _db.messages.messageId.isSmallerThanValue(after.messageId)));
+      query.where(
+        _db.messages.date.isSmallerThanValue(after.date) |
+            (_db.messages.date.equals(after.date) &
+                _db.messages.messageId.isSmallerThanValue(after.messageId)),
+      );
     }
 
     query
@@ -326,12 +468,12 @@ class MessageRepository {
   }
 
   List<FeedEntry> _mapRows(List<TypedResult> rows) => [
-        for (final row in rows)
-          FeedEntry(
-            message: row.readTable(_db.messages),
-            channel: row.readTable(_db.channels),
-          ),
-      ];
+    for (final row in rows)
+      FeedEntry(
+        message: row.readTable(_db.messages),
+        channel: row.readTable(_db.channels),
+      ),
+  ];
 
   // ---------------------------------------------------------------------------
   // Reactions and threads
@@ -352,9 +494,11 @@ class MessageRepository {
     int messageId, {
     String emoji = likeEmoji,
   }) async {
-    final row = await (_db.select(_db.messages)
-          ..where((m) => m.chatId.equals(chatId) & m.messageId.equals(messageId)))
-        .getSingleOrNull();
+    final row =
+        await (_db.select(_db.messages)..where(
+              (m) => m.chatId.equals(chatId) & m.messageId.equals(messageId),
+            ))
+            .getSingleOrNull();
     if (row == null) return;
 
     final wasChosen = row.chosenReaction == emoji;
@@ -368,19 +512,23 @@ class MessageRepository {
 
     try {
       if (wasChosen) {
-        await _client.send<td.Ok>(td.RemoveMessageReaction(
-          chatId: chatId,
-          messageId: messageId,
-          reactionType: td.ReactionTypeEmoji(emoji: emoji),
-        ));
+        await _client.send<td.Ok>(
+          td.RemoveMessageReaction(
+            chatId: chatId,
+            messageId: messageId,
+            reactionType: td.ReactionTypeEmoji(emoji: emoji),
+          ),
+        );
       } else {
-        await _client.send<td.Ok>(td.AddMessageReaction(
-          chatId: chatId,
-          messageId: messageId,
-          reactionType: td.ReactionTypeEmoji(emoji: emoji),
-          isBig: false,
-          updateRecentReactions: true,
-        ));
+        await _client.send<td.Ok>(
+          td.AddMessageReaction(
+            chatId: chatId,
+            messageId: messageId,
+            reactionType: td.ReactionTypeEmoji(emoji: emoji),
+            isBig: false,
+            updateRecentReactions: true,
+          ),
+        );
       }
     } on TdException {
       await _writeReaction(
@@ -404,7 +552,9 @@ class MessageRepository {
       'reaction_count = MAX(reaction_count + ?2, 0) '
       'WHERE chat_id = ?3 AND message_id = ?4',
       variables: [
-        chosen == null ? const Variable<String>(null) : Variable.withString(chosen),
+        chosen == null
+            ? const Variable<String>(null)
+            : Variable.withString(chosen),
         Variable.withInt(countDelta),
         Variable.withInt(chatId),
         Variable.withInt(messageId),
@@ -445,8 +595,9 @@ class MessageRepository {
 
   Future<int> countMessages() async {
     final count = _db.messages.messageId.count();
-    final row =
-        await (_db.selectOnly(_db.messages)..addColumns([count])).getSingle();
+    final row = await (_db.selectOnly(
+      _db.messages,
+    )..addColumns([count])).getSingle();
     return row.read(count) ?? 0;
   }
 
@@ -466,19 +617,21 @@ class MessageRepository {
   }
 
   Future<bool> _isTracked(int chatId) async {
-    final row = await (_db.select(_db.channels)..where((c) => c.id.equals(chatId)))
-        .getSingleOrNull();
+    final row = await (_db.select(
+      _db.channels,
+    )..where((c) => c.id.equals(chatId))).getSingleOrNull();
     return row != null;
   }
 
   /// Moves [Channels.lastSyncedMessageId] forward only. Message IDs in a chat
   /// increase monotonically, so this is a high-water mark.
   Future<void> _advanceCursor(int chatId, int messageId) async {
-    await (_db.update(_db.channels)
-          ..where((c) =>
+    await (_db.update(_db.channels)..where(
+          (c) =>
               c.id.equals(chatId) &
               (c.lastSyncedMessageId.isSmallerThanValue(messageId) |
-                  c.lastSyncedMessageId.isNull())))
+                  c.lastSyncedMessageId.isNull()),
+        ))
         .write(ChannelsCompanion(lastSyncedMessageId: Value(messageId)));
   }
 

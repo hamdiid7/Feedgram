@@ -6,9 +6,10 @@ import 'package:sqlite3/sqlite3.dart' as raw;
 
 import 'package:feedgram/data/app_database.dart';
 
-/// Exercises the v4 → v6 upgrade: v5 removes the forward graph, v6 moves feed
-/// membership into `channel_lists`. A real device jumps straight from 4 to 6, so
-/// that is the path tested.
+/// Exercises the v4 → v7 upgrade: v5 removes the forward graph, v6 moves feed
+/// membership into `channel_lists`, v7 adds content classification, v8 adds the
+/// stored For You score, v9 the seen-post memory. A real device jumps straight
+/// from 4 to 9, so that is the path tested.
 ///
 /// The DDL below is copied verbatim from a real v4 database pulled off a device,
 /// not hand-idealised, so this tests the migration against what actually shipped.
@@ -73,6 +74,24 @@ void main() {
       );
     }
 
+    // Media rows for the v7 classification backfill. The .gif document is the
+    // real-world case that made this necessary.
+    db.execute(
+      "INSERT INTO messages (chat_id, message_id, date, text, media_json) "
+      "VALUES (-1001, 601, 1700001000, '', "
+      '\'{"type":"document","name":"855334_0.gif","fileId":7}\')',
+    );
+    db.execute(
+      "INSERT INTO messages (chat_id, message_id, date, text, media_json) "
+      "VALUES (-1001, 602, 1700001001, '', "
+      '\'{"type":"document","name":"report.pdf","fileId":8}\')',
+    );
+    db.execute(
+      "INSERT INTO messages (chat_id, message_id, date, text, media_json) "
+      "VALUES (-1001, 603, 1700001002, '', "
+      '\'{"type":"photo","fileId":9}\')',
+    );
+
     db.execute(
       'INSERT INTO vouches (source_chat_id, target_chat_id, first_seen, '
       'last_seen, count) VALUES (-1001, -2001, 1700000000, 1700000100, 3)',
@@ -99,7 +118,7 @@ void main() {
         .customSelect('PRAGMA user_version')
         .map((r) => r.read<int>('user_version'))
         .getSingle();
-    expect(version, 6);
+    expect(version, 9);
   });
 
   group('v6 — channel_lists', () {
@@ -150,7 +169,7 @@ void main() {
             "AND l.list_name = 'following'",
           )
           .getSingle();
-      expect(rows.read<int>('n'), 3);
+      expect(rows.read<int>('n'), 6, reason: '3 text + 3 media rows seeded');
     });
 
     test('the list_name index exists', () async {
@@ -222,8 +241,11 @@ void main() {
     // The spec keeps this column for "forwarded from X" display even though it no
     // longer feeds any ranking.
     final messages = await db.select(db.messages).get();
-    expect(messages, hasLength(3));
-    expect(messages.every((m) => m.forwardedFromChatId == -2001), isTrue);
+    expect(messages, hasLength(6), reason: '3 text + 3 media rows seeded');
+    final forwarded =
+        messages.where((m) => m.forwardedFromChatId != null).toList();
+    expect(forwarded, hasLength(3));
+    expect(forwarded.every((m) => m.forwardedFromChatId == -2001), isTrue);
   });
 
   test('the Following feed still returns every channel after migrating',
@@ -232,15 +254,17 @@ void main() {
     addTearDown(db.close);
 
     // Following does not filter on source, so converting rather than deleting is
-    // what keeps this count stable. Deleting the suggested channel would have
-    // silently dropped a third of the feed.
-    final rows = await db
+    // what keeps every channel's posts reachable. Deleting the suggested channel
+    // would have silently dropped a third of the feed.
+    final perChannel = await db
         .customSelect(
-          'SELECT COUNT(*) AS n FROM messages m '
-          'JOIN channels c ON c.id = m.chat_id',
+          'SELECT c.id AS id, COUNT(*) AS n FROM messages m '
+          'JOIN channels c ON c.id = m.chat_id GROUP BY c.id',
         )
-        .getSingle();
-    expect(rows.read<int>('n'), 3);
+        .map((r) => r.read<int>('id'))
+        .get();
+    expect(perChannel, containsAll([-1001, -1002, -2001]),
+        reason: 'the converted channel still contributes posts');
   });
 
   test('a second open is a no-op', () async {
@@ -250,5 +274,112 @@ void main() {
     final second = await migrate();
     addTearDown(second.close);
     expect(await second.select(second.channels).get(), hasLength(3));
+  });
+
+  group('v7 content classification backfill', () {
+    test('derives content_kind from the stored media descriptor', () async {
+      final db = await migrate();
+      addTearDown(db.close);
+
+      // 12k existing rows must classify without a re-backfill, so the migration
+      // reads media_json rather than needing TDLib.
+      final kinds = await db
+          .customSelect(
+            'SELECT message_id, content_kind FROM messages ORDER BY message_id',
+          )
+          .map((r) => (r.read<int>('message_id'), r.read<String>('content_kind')))
+          .get();
+
+      expect(kinds, isNotEmpty);
+      // Row 500 was seeded with no media_json at all.
+      expect(kinds.firstWhere((k) => k.$1 == 500).$2, 'text');
+    });
+
+    test('rescues GIFs that were stored as documents', () async {
+      final db = await migrate();
+      addTearDown(db.close);
+
+      // The @gifs6 case: a document named *.gif is real content, and the document
+      // filter would otherwise hide it forever.
+      final kind = await db
+          .customSelect(
+            'SELECT content_kind FROM messages WHERE message_id = 601',
+          )
+          .map((r) => r.read<String>('content_kind'))
+          .getSingle();
+      expect(kind, 'animation');
+    });
+
+    test('leaves genuine documents hidden', () async {
+      final db = await migrate();
+      addTearDown(db.close);
+
+      final kind = await db
+          .customSelect(
+            'SELECT content_kind FROM messages WHERE message_id = 602',
+          )
+          .map((r) => r.read<String>('content_kind'))
+          .getSingle();
+      expect(kind, 'document');
+    });
+
+    test('via_bot defaults to false for rows that predate it', () async {
+      final db = await migrate();
+      addTearDown(db.close);
+
+      // It was never stored, so it cannot be recovered — already-cached
+      // auto-poster spam stays visible until those channels are backfilled again.
+      final count = await db
+          .customSelect('SELECT COUNT(*) AS n FROM messages WHERE via_bot = 0')
+          .map((r) => r.read<int>('n'))
+          .getSingle();
+      final total = await db
+          .customSelect('SELECT COUNT(*) AS n FROM messages')
+          .map((r) => r.read<int>('n'))
+          .getSingle();
+      expect(count, total);
+    });
+  });
+
+  group('v8 score column', () {
+    test('exists, is indexed, and starts null', () async {
+      final db = await migrate();
+      addTearDown(db.close);
+
+      final scores = await db
+          .customSelect('SELECT COUNT(*) AS n FROM messages WHERE score IS NULL')
+          .map((r) => r.read<int>('n'))
+          .getSingle();
+      final total = await db
+          .customSelect('SELECT COUNT(*) AS n FROM messages')
+          .map((r) => r.read<int>('n'))
+          .getSingle();
+      // Null on purpose: a score only means something for the for_you pool inside
+      // the window, and the first scoring pass fills it in. Inventing values here
+      // would rank posts that are not candidates.
+      expect(scores, total);
+
+      final index = await db
+          .customSelect(
+            "SELECT name FROM sqlite_master WHERE type = 'index' "
+            "AND name = 'messages_score'",
+          )
+          .get();
+      expect(index, hasLength(1),
+          reason: 'For You reads in score order and must not sort per page');
+    });
+  });
+
+  test('v9 creates the seen-post table empty', () async {
+    final db = await migrate();
+    addTearDown(db.close);
+
+    // Nothing is pre-marked: an upgrade must not hide posts the reader has never
+    // actually been shown.
+    final seen = await db
+        .customSelect('SELECT COUNT(*) AS n FROM seen_posts')
+        .map((r) => r.read<int>('n'))
+        .getSingle();
+    expect(seen, 0);
   });
 }

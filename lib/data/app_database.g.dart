@@ -610,6 +610,38 @@ class $MessagesTable extends Messages with TableInfo<$MessagesTable, Message> {
     requiredDuringInsert: false,
   );
   @override
+  late final GeneratedColumnWithTypeConverter<ContentKind, String> contentKind =
+      GeneratedColumn<String>(
+        'content_kind',
+        aliasedName,
+        false,
+        type: DriftSqlType.string,
+        requiredDuringInsert: false,
+        defaultValue: const Constant('other'),
+      ).withConverter<ContentKind>($MessagesTable.$convertercontentKind);
+  static const VerificationMeta _scoreMeta = const VerificationMeta('score');
+  @override
+  late final GeneratedColumn<double> score = GeneratedColumn<double>(
+    'score',
+    aliasedName,
+    true,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _viaBotMeta = const VerificationMeta('viaBot');
+  @override
+  late final GeneratedColumn<bool> viaBot = GeneratedColumn<bool>(
+    'via_bot',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("via_bot" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  @override
   List<GeneratedColumn> get $columns => [
     chatId,
     messageId,
@@ -627,6 +659,9 @@ class $MessagesTable extends Messages with TableInfo<$MessagesTable, Message> {
     threadId,
     replyCount,
     chosenReaction,
+    contentKind,
+    score,
+    viaBot,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -757,6 +792,18 @@ class $MessagesTable extends Messages with TableInfo<$MessagesTable, Message> {
         ),
       );
     }
+    if (data.containsKey('score')) {
+      context.handle(
+        _scoreMeta,
+        score.isAcceptableOrUnknown(data['score']!, _scoreMeta),
+      );
+    }
+    if (data.containsKey('via_bot')) {
+      context.handle(
+        _viaBotMeta,
+        viaBot.isAcceptableOrUnknown(data['via_bot']!, _viaBotMeta),
+      );
+    }
     return context;
   }
 
@@ -830,6 +877,20 @@ class $MessagesTable extends Messages with TableInfo<$MessagesTable, Message> {
         DriftSqlType.string,
         data['${effectivePrefix}chosen_reaction'],
       ),
+      contentKind: $MessagesTable.$convertercontentKind.fromSql(
+        attachedDatabase.typeMapping.read(
+          DriftSqlType.string,
+          data['${effectivePrefix}content_kind'],
+        )!,
+      ),
+      score: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}score'],
+      ),
+      viaBot: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}via_bot'],
+      )!,
     );
   }
 
@@ -837,6 +898,9 @@ class $MessagesTable extends Messages with TableInfo<$MessagesTable, Message> {
   $MessagesTable createAlias(String alias) {
     return $MessagesTable(attachedDatabase, alias);
   }
+
+  static JsonTypeConverter2<ContentKind, String, String> $convertercontentKind =
+      const EnumNameConverter<ContentKind>(ContentKind.values);
 }
 
 class Message extends DataClass implements Insertable<Message> {
@@ -891,6 +955,24 @@ class Message extends DataClass implements Insertable<Message> {
 
   /// The emoji this account reacted with, if any. Drives the like toggle.
   final String? chosenReaction;
+
+  /// What kind of post this is. Feeds filter on it.
+  final ContentKind contentKind;
+
+  /// For You ranking score: smoothed likes ÷ views. Null until a scoring pass
+  /// covers it.
+  ///
+  /// **Stored, not computed on the fly.** Keyset pagination has to compare against
+  /// a stable value; a score recomputed per query would shift under the cursor and
+  /// duplicate or skip rows exactly the way `OFFSET` does.
+  final double? score;
+
+  /// Sent *through* an inline bot — the auto-poster / RSS / ad pattern.
+  ///
+  /// This is `via_bot_user_id != 0` on the message, not "the sender looks like a
+  /// bot": plenty of legitimate channels have bot-ish usernames, and plenty of
+  /// spam comes from ordinary-looking ones.
+  final bool viaBot;
   const Message({
     required this.chatId,
     required this.messageId,
@@ -908,6 +990,9 @@ class Message extends DataClass implements Insertable<Message> {
     this.threadId,
     required this.replyCount,
     this.chosenReaction,
+    required this.contentKind,
+    this.score,
+    required this.viaBot,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -944,6 +1029,15 @@ class Message extends DataClass implements Insertable<Message> {
     if (!nullToAbsent || chosenReaction != null) {
       map['chosen_reaction'] = Variable<String>(chosenReaction);
     }
+    {
+      map['content_kind'] = Variable<String>(
+        $MessagesTable.$convertercontentKind.toSql(contentKind),
+      );
+    }
+    if (!nullToAbsent || score != null) {
+      map['score'] = Variable<double>(score);
+    }
+    map['via_bot'] = Variable<bool>(viaBot);
     return map;
   }
 
@@ -981,6 +1075,11 @@ class Message extends DataClass implements Insertable<Message> {
       chosenReaction: chosenReaction == null && nullToAbsent
           ? const Value.absent()
           : Value(chosenReaction),
+      contentKind: Value(contentKind),
+      score: score == null && nullToAbsent
+          ? const Value.absent()
+          : Value(score),
+      viaBot: Value(viaBot),
     );
   }
 
@@ -1008,6 +1107,11 @@ class Message extends DataClass implements Insertable<Message> {
       threadId: serializer.fromJson<int?>(json['threadId']),
       replyCount: serializer.fromJson<int>(json['replyCount']),
       chosenReaction: serializer.fromJson<String?>(json['chosenReaction']),
+      contentKind: $MessagesTable.$convertercontentKind.fromJson(
+        serializer.fromJson<String>(json['contentKind']),
+      ),
+      score: serializer.fromJson<double?>(json['score']),
+      viaBot: serializer.fromJson<bool>(json['viaBot']),
     );
   }
   @override
@@ -1030,6 +1134,11 @@ class Message extends DataClass implements Insertable<Message> {
       'threadId': serializer.toJson<int?>(threadId),
       'replyCount': serializer.toJson<int>(replyCount),
       'chosenReaction': serializer.toJson<String?>(chosenReaction),
+      'contentKind': serializer.toJson<String>(
+        $MessagesTable.$convertercontentKind.toJson(contentKind),
+      ),
+      'score': serializer.toJson<double?>(score),
+      'viaBot': serializer.toJson<bool>(viaBot),
     };
   }
 
@@ -1050,6 +1159,9 @@ class Message extends DataClass implements Insertable<Message> {
     Value<int?> threadId = const Value.absent(),
     int? replyCount,
     Value<String?> chosenReaction = const Value.absent(),
+    ContentKind? contentKind,
+    Value<double?> score = const Value.absent(),
+    bool? viaBot,
   }) => Message(
     chatId: chatId ?? this.chatId,
     messageId: messageId ?? this.messageId,
@@ -1071,6 +1183,9 @@ class Message extends DataClass implements Insertable<Message> {
     chosenReaction: chosenReaction.present
         ? chosenReaction.value
         : this.chosenReaction,
+    contentKind: contentKind ?? this.contentKind,
+    score: score.present ? score.value : this.score,
+    viaBot: viaBot ?? this.viaBot,
   );
   Message copyWithCompanion(MessagesCompanion data) {
     return Message(
@@ -1102,6 +1217,11 @@ class Message extends DataClass implements Insertable<Message> {
       chosenReaction: data.chosenReaction.present
           ? data.chosenReaction.value
           : this.chosenReaction,
+      contentKind: data.contentKind.present
+          ? data.contentKind.value
+          : this.contentKind,
+      score: data.score.present ? data.score.value : this.score,
+      viaBot: data.viaBot.present ? data.viaBot.value : this.viaBot,
     );
   }
 
@@ -1123,7 +1243,10 @@ class Message extends DataClass implements Insertable<Message> {
           ..write('editDate: $editDate, ')
           ..write('threadId: $threadId, ')
           ..write('replyCount: $replyCount, ')
-          ..write('chosenReaction: $chosenReaction')
+          ..write('chosenReaction: $chosenReaction, ')
+          ..write('contentKind: $contentKind, ')
+          ..write('score: $score, ')
+          ..write('viaBot: $viaBot')
           ..write(')'))
         .toString();
   }
@@ -1146,6 +1269,9 @@ class Message extends DataClass implements Insertable<Message> {
     threadId,
     replyCount,
     chosenReaction,
+    contentKind,
+    score,
+    viaBot,
   );
   @override
   bool operator ==(Object other) =>
@@ -1166,7 +1292,10 @@ class Message extends DataClass implements Insertable<Message> {
           other.editDate == this.editDate &&
           other.threadId == this.threadId &&
           other.replyCount == this.replyCount &&
-          other.chosenReaction == this.chosenReaction);
+          other.chosenReaction == this.chosenReaction &&
+          other.contentKind == this.contentKind &&
+          other.score == this.score &&
+          other.viaBot == this.viaBot);
 }
 
 class MessagesCompanion extends UpdateCompanion<Message> {
@@ -1186,6 +1315,9 @@ class MessagesCompanion extends UpdateCompanion<Message> {
   final Value<int?> threadId;
   final Value<int> replyCount;
   final Value<String?> chosenReaction;
+  final Value<ContentKind> contentKind;
+  final Value<double?> score;
+  final Value<bool> viaBot;
   final Value<int> rowid;
   const MessagesCompanion({
     this.chatId = const Value.absent(),
@@ -1204,6 +1336,9 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     this.threadId = const Value.absent(),
     this.replyCount = const Value.absent(),
     this.chosenReaction = const Value.absent(),
+    this.contentKind = const Value.absent(),
+    this.score = const Value.absent(),
+    this.viaBot = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   MessagesCompanion.insert({
@@ -1223,6 +1358,9 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     this.threadId = const Value.absent(),
     this.replyCount = const Value.absent(),
     this.chosenReaction = const Value.absent(),
+    this.contentKind = const Value.absent(),
+    this.score = const Value.absent(),
+    this.viaBot = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : chatId = Value(chatId),
        messageId = Value(messageId),
@@ -1244,6 +1382,9 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     Expression<int>? threadId,
     Expression<int>? replyCount,
     Expression<String>? chosenReaction,
+    Expression<String>? contentKind,
+    Expression<double>? score,
+    Expression<bool>? viaBot,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1264,6 +1405,9 @@ class MessagesCompanion extends UpdateCompanion<Message> {
       if (threadId != null) 'thread_id': threadId,
       if (replyCount != null) 'reply_count': replyCount,
       if (chosenReaction != null) 'chosen_reaction': chosenReaction,
+      if (contentKind != null) 'content_kind': contentKind,
+      if (score != null) 'score': score,
+      if (viaBot != null) 'via_bot': viaBot,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1285,6 +1429,9 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     Value<int?>? threadId,
     Value<int>? replyCount,
     Value<String?>? chosenReaction,
+    Value<ContentKind>? contentKind,
+    Value<double?>? score,
+    Value<bool>? viaBot,
     Value<int>? rowid,
   }) {
     return MessagesCompanion(
@@ -1304,6 +1451,9 @@ class MessagesCompanion extends UpdateCompanion<Message> {
       threadId: threadId ?? this.threadId,
       replyCount: replyCount ?? this.replyCount,
       chosenReaction: chosenReaction ?? this.chosenReaction,
+      contentKind: contentKind ?? this.contentKind,
+      score: score ?? this.score,
+      viaBot: viaBot ?? this.viaBot,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1359,6 +1509,17 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     if (chosenReaction.present) {
       map['chosen_reaction'] = Variable<String>(chosenReaction.value);
     }
+    if (contentKind.present) {
+      map['content_kind'] = Variable<String>(
+        $MessagesTable.$convertercontentKind.toSql(contentKind.value),
+      );
+    }
+    if (score.present) {
+      map['score'] = Variable<double>(score.value);
+    }
+    if (viaBot.present) {
+      map['via_bot'] = Variable<bool>(viaBot.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1384,6 +1545,9 @@ class MessagesCompanion extends UpdateCompanion<Message> {
           ..write('threadId: $threadId, ')
           ..write('replyCount: $replyCount, ')
           ..write('chosenReaction: $chosenReaction, ')
+          ..write('contentKind: $contentKind, ')
+          ..write('score: $score, ')
+          ..write('viaBot: $viaBot, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -1669,12 +1833,319 @@ class ChannelListsCompanion extends UpdateCompanion<ChannelMembership> {
   }
 }
 
+class $SeenPostsTable extends SeenPosts
+    with TableInfo<$SeenPostsTable, SeenPost> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $SeenPostsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _linkMeta = const VerificationMeta('link');
+  @override
+  late final GeneratedColumn<String> link = GeneratedColumn<String>(
+    'link',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _chatIdMeta = const VerificationMeta('chatId');
+  @override
+  late final GeneratedColumn<int> chatId = GeneratedColumn<int>(
+    'chat_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _messageIdMeta = const VerificationMeta(
+    'messageId',
+  );
+  @override
+  late final GeneratedColumn<int> messageId = GeneratedColumn<int>(
+    'message_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _seenAtMeta = const VerificationMeta('seenAt');
+  @override
+  late final GeneratedColumn<int> seenAt = GeneratedColumn<int>(
+    'seen_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [link, chatId, messageId, seenAt];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'seen_posts';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<SeenPost> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('link')) {
+      context.handle(
+        _linkMeta,
+        link.isAcceptableOrUnknown(data['link']!, _linkMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_linkMeta);
+    }
+    if (data.containsKey('chat_id')) {
+      context.handle(
+        _chatIdMeta,
+        chatId.isAcceptableOrUnknown(data['chat_id']!, _chatIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_chatIdMeta);
+    }
+    if (data.containsKey('message_id')) {
+      context.handle(
+        _messageIdMeta,
+        messageId.isAcceptableOrUnknown(data['message_id']!, _messageIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_messageIdMeta);
+    }
+    if (data.containsKey('seen_at')) {
+      context.handle(
+        _seenAtMeta,
+        seenAt.isAcceptableOrUnknown(data['seen_at']!, _seenAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_seenAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {link};
+  @override
+  SeenPost map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return SeenPost(
+      link: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}link'],
+      )!,
+      chatId: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}chat_id'],
+      )!,
+      messageId: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}message_id'],
+      )!,
+      seenAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}seen_at'],
+      )!,
+    );
+  }
+
+  @override
+  $SeenPostsTable createAlias(String alias) {
+    return $SeenPostsTable(attachedDatabase, alias);
+  }
+}
+
+class SeenPost extends DataClass implements Insertable<SeenPost> {
+  /// `t.me/<username>/<id>` for public channels, `c/<chatId>/<id>` otherwise.
+  final String link;
+  final int chatId;
+  final int messageId;
+  final int seenAt;
+  const SeenPost({
+    required this.link,
+    required this.chatId,
+    required this.messageId,
+    required this.seenAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['link'] = Variable<String>(link);
+    map['chat_id'] = Variable<int>(chatId);
+    map['message_id'] = Variable<int>(messageId);
+    map['seen_at'] = Variable<int>(seenAt);
+    return map;
+  }
+
+  SeenPostsCompanion toCompanion(bool nullToAbsent) {
+    return SeenPostsCompanion(
+      link: Value(link),
+      chatId: Value(chatId),
+      messageId: Value(messageId),
+      seenAt: Value(seenAt),
+    );
+  }
+
+  factory SeenPost.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return SeenPost(
+      link: serializer.fromJson<String>(json['link']),
+      chatId: serializer.fromJson<int>(json['chatId']),
+      messageId: serializer.fromJson<int>(json['messageId']),
+      seenAt: serializer.fromJson<int>(json['seenAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'link': serializer.toJson<String>(link),
+      'chatId': serializer.toJson<int>(chatId),
+      'messageId': serializer.toJson<int>(messageId),
+      'seenAt': serializer.toJson<int>(seenAt),
+    };
+  }
+
+  SeenPost copyWith({String? link, int? chatId, int? messageId, int? seenAt}) =>
+      SeenPost(
+        link: link ?? this.link,
+        chatId: chatId ?? this.chatId,
+        messageId: messageId ?? this.messageId,
+        seenAt: seenAt ?? this.seenAt,
+      );
+  SeenPost copyWithCompanion(SeenPostsCompanion data) {
+    return SeenPost(
+      link: data.link.present ? data.link.value : this.link,
+      chatId: data.chatId.present ? data.chatId.value : this.chatId,
+      messageId: data.messageId.present ? data.messageId.value : this.messageId,
+      seenAt: data.seenAt.present ? data.seenAt.value : this.seenAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SeenPost(')
+          ..write('link: $link, ')
+          ..write('chatId: $chatId, ')
+          ..write('messageId: $messageId, ')
+          ..write('seenAt: $seenAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(link, chatId, messageId, seenAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is SeenPost &&
+          other.link == this.link &&
+          other.chatId == this.chatId &&
+          other.messageId == this.messageId &&
+          other.seenAt == this.seenAt);
+}
+
+class SeenPostsCompanion extends UpdateCompanion<SeenPost> {
+  final Value<String> link;
+  final Value<int> chatId;
+  final Value<int> messageId;
+  final Value<int> seenAt;
+  final Value<int> rowid;
+  const SeenPostsCompanion({
+    this.link = const Value.absent(),
+    this.chatId = const Value.absent(),
+    this.messageId = const Value.absent(),
+    this.seenAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  SeenPostsCompanion.insert({
+    required String link,
+    required int chatId,
+    required int messageId,
+    required int seenAt,
+    this.rowid = const Value.absent(),
+  }) : link = Value(link),
+       chatId = Value(chatId),
+       messageId = Value(messageId),
+       seenAt = Value(seenAt);
+  static Insertable<SeenPost> custom({
+    Expression<String>? link,
+    Expression<int>? chatId,
+    Expression<int>? messageId,
+    Expression<int>? seenAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (link != null) 'link': link,
+      if (chatId != null) 'chat_id': chatId,
+      if (messageId != null) 'message_id': messageId,
+      if (seenAt != null) 'seen_at': seenAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  SeenPostsCompanion copyWith({
+    Value<String>? link,
+    Value<int>? chatId,
+    Value<int>? messageId,
+    Value<int>? seenAt,
+    Value<int>? rowid,
+  }) {
+    return SeenPostsCompanion(
+      link: link ?? this.link,
+      chatId: chatId ?? this.chatId,
+      messageId: messageId ?? this.messageId,
+      seenAt: seenAt ?? this.seenAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (link.present) {
+      map['link'] = Variable<String>(link.value);
+    }
+    if (chatId.present) {
+      map['chat_id'] = Variable<int>(chatId.value);
+    }
+    if (messageId.present) {
+      map['message_id'] = Variable<int>(messageId.value);
+    }
+    if (seenAt.present) {
+      map['seen_at'] = Variable<int>(seenAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SeenPostsCompanion(')
+          ..write('link: $link, ')
+          ..write('chatId: $chatId, ')
+          ..write('messageId: $messageId, ')
+          ..write('seenAt: $seenAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
   late final $ChannelsTable channels = $ChannelsTable(this);
   late final $MessagesTable messages = $MessagesTable(this);
   late final $ChannelListsTable channelLists = $ChannelListsTable(this);
+  late final $SeenPostsTable seenPosts = $SeenPostsTable(this);
   late final Index channelsSource = Index(
     'channels_source',
     'CREATE INDEX channels_source ON channels (source)',
@@ -1686,6 +2157,10 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final Index messagesGrouped = Index(
     'messages_grouped',
     'CREATE INDEX messages_grouped ON messages (chat_id, grouped_id)',
+  );
+  late final Index messagesScore = Index(
+    'messages_score',
+    'CREATE INDEX messages_score ON messages (score, message_id)',
   );
   late final Index channelListsName = Index(
     'channel_lists_name',
@@ -1699,9 +2174,11 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     channels,
     messages,
     channelLists,
+    seenPosts,
     channelsSource,
     messagesDate,
     messagesGrouped,
+    messagesScore,
     channelListsName,
   ];
 }
@@ -2139,6 +2616,9 @@ typedef $$MessagesTableCreateCompanionBuilder =
       Value<int?> threadId,
       Value<int> replyCount,
       Value<String?> chosenReaction,
+      Value<ContentKind> contentKind,
+      Value<double?> score,
+      Value<bool> viaBot,
       Value<int> rowid,
     });
 typedef $$MessagesTableUpdateCompanionBuilder =
@@ -2159,6 +2639,9 @@ typedef $$MessagesTableUpdateCompanionBuilder =
       Value<int?> threadId,
       Value<int> replyCount,
       Value<String?> chosenReaction,
+      Value<ContentKind> contentKind,
+      Value<double?> score,
+      Value<bool> viaBot,
       Value<int> rowid,
     });
 
@@ -2265,6 +2748,22 @@ class $$MessagesTableFilterComposer
 
   ColumnFilters<String> get chosenReaction => $composableBuilder(
     column: $table.chosenReaction,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnWithTypeConverterFilters<ContentKind, ContentKind, String>
+  get contentKind => $composableBuilder(
+    column: $table.contentKind,
+    builder: (column) => ColumnWithTypeConverterFilters(column),
+  );
+
+  ColumnFilters<double> get score => $composableBuilder(
+    column: $table.score,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get viaBot => $composableBuilder(
+    column: $table.viaBot,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -2376,6 +2875,21 @@ class $$MessagesTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get contentKind => $composableBuilder(
+    column: $table.contentKind,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get score => $composableBuilder(
+    column: $table.score,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get viaBot => $composableBuilder(
+    column: $table.viaBot,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   $$ChannelsTableOrderingComposer get chatId {
     final $$ChannelsTableOrderingComposer composer = $composerBuilder(
       composer: this,
@@ -2466,6 +2980,18 @@ class $$MessagesTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumnWithTypeConverter<ContentKind, String> get contentKind =>
+      $composableBuilder(
+        column: $table.contentKind,
+        builder: (column) => column,
+      );
+
+  GeneratedColumn<double> get score =>
+      $composableBuilder(column: $table.score, builder: (column) => column);
+
+  GeneratedColumn<bool> get viaBot =>
+      $composableBuilder(column: $table.viaBot, builder: (column) => column);
+
   $$ChannelsTableAnnotationComposer get chatId {
     final $$ChannelsTableAnnotationComposer composer = $composerBuilder(
       composer: this,
@@ -2534,6 +3060,9 @@ class $$MessagesTableTableManager
                 Value<int?> threadId = const Value.absent(),
                 Value<int> replyCount = const Value.absent(),
                 Value<String?> chosenReaction = const Value.absent(),
+                Value<ContentKind> contentKind = const Value.absent(),
+                Value<double?> score = const Value.absent(),
+                Value<bool> viaBot = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessagesCompanion(
                 chatId: chatId,
@@ -2552,6 +3081,9 @@ class $$MessagesTableTableManager
                 threadId: threadId,
                 replyCount: replyCount,
                 chosenReaction: chosenReaction,
+                contentKind: contentKind,
+                score: score,
+                viaBot: viaBot,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -2572,6 +3104,9 @@ class $$MessagesTableTableManager
                 Value<int?> threadId = const Value.absent(),
                 Value<int> replyCount = const Value.absent(),
                 Value<String?> chosenReaction = const Value.absent(),
+                Value<ContentKind> contentKind = const Value.absent(),
+                Value<double?> score = const Value.absent(),
+                Value<bool> viaBot = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessagesCompanion.insert(
                 chatId: chatId,
@@ -2590,6 +3125,9 @@ class $$MessagesTableTableManager
                 threadId: threadId,
                 replyCount: replyCount,
                 chosenReaction: chosenReaction,
+                contentKind: contentKind,
+                score: score,
+                viaBot: viaBot,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0
@@ -2940,6 +3478,181 @@ typedef $$ChannelListsTableProcessedTableManager =
       ChannelMembership,
       PrefetchHooks Function({bool chatId})
     >;
+typedef $$SeenPostsTableCreateCompanionBuilder =
+    SeenPostsCompanion Function({
+      required String link,
+      required int chatId,
+      required int messageId,
+      required int seenAt,
+      Value<int> rowid,
+    });
+typedef $$SeenPostsTableUpdateCompanionBuilder =
+    SeenPostsCompanion Function({
+      Value<String> link,
+      Value<int> chatId,
+      Value<int> messageId,
+      Value<int> seenAt,
+      Value<int> rowid,
+    });
+
+class $$SeenPostsTableFilterComposer
+    extends Composer<_$AppDatabase, $SeenPostsTable> {
+  $$SeenPostsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get link => $composableBuilder(
+    column: $table.link,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get chatId => $composableBuilder(
+    column: $table.chatId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get messageId => $composableBuilder(
+    column: $table.messageId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get seenAt => $composableBuilder(
+    column: $table.seenAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$SeenPostsTableOrderingComposer
+    extends Composer<_$AppDatabase, $SeenPostsTable> {
+  $$SeenPostsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get link => $composableBuilder(
+    column: $table.link,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get chatId => $composableBuilder(
+    column: $table.chatId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get messageId => $composableBuilder(
+    column: $table.messageId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get seenAt => $composableBuilder(
+    column: $table.seenAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$SeenPostsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $SeenPostsTable> {
+  $$SeenPostsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get link =>
+      $composableBuilder(column: $table.link, builder: (column) => column);
+
+  GeneratedColumn<int> get chatId =>
+      $composableBuilder(column: $table.chatId, builder: (column) => column);
+
+  GeneratedColumn<int> get messageId =>
+      $composableBuilder(column: $table.messageId, builder: (column) => column);
+
+  GeneratedColumn<int> get seenAt =>
+      $composableBuilder(column: $table.seenAt, builder: (column) => column);
+}
+
+class $$SeenPostsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $SeenPostsTable,
+          SeenPost,
+          $$SeenPostsTableFilterComposer,
+          $$SeenPostsTableOrderingComposer,
+          $$SeenPostsTableAnnotationComposer,
+          $$SeenPostsTableCreateCompanionBuilder,
+          $$SeenPostsTableUpdateCompanionBuilder,
+          (SeenPost, BaseReferences<_$AppDatabase, $SeenPostsTable, SeenPost>),
+          SeenPost,
+          PrefetchHooks Function()
+        > {
+  $$SeenPostsTableTableManager(_$AppDatabase db, $SeenPostsTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$SeenPostsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$SeenPostsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$SeenPostsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> link = const Value.absent(),
+                Value<int> chatId = const Value.absent(),
+                Value<int> messageId = const Value.absent(),
+                Value<int> seenAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => SeenPostsCompanion(
+                link: link,
+                chatId: chatId,
+                messageId: messageId,
+                seenAt: seenAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String link,
+                required int chatId,
+                required int messageId,
+                required int seenAt,
+                Value<int> rowid = const Value.absent(),
+              }) => SeenPostsCompanion.insert(
+                link: link,
+                chatId: chatId,
+                messageId: messageId,
+                seenAt: seenAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$SeenPostsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $SeenPostsTable,
+      SeenPost,
+      $$SeenPostsTableFilterComposer,
+      $$SeenPostsTableOrderingComposer,
+      $$SeenPostsTableAnnotationComposer,
+      $$SeenPostsTableCreateCompanionBuilder,
+      $$SeenPostsTableUpdateCompanionBuilder,
+      (SeenPost, BaseReferences<_$AppDatabase, $SeenPostsTable, SeenPost>),
+      SeenPost,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -2950,4 +3663,6 @@ class $AppDatabaseManager {
       $$MessagesTableTableManager(_db, _db.messages);
   $$ChannelListsTableTableManager get channelLists =>
       $$ChannelListsTableTableManager(_db, _db.channelLists);
+  $$SeenPostsTableTableManager get seenPosts =>
+      $$SeenPostsTableTableManager(_db, _db.seenPosts);
 }

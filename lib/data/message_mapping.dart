@@ -18,12 +18,17 @@ class MessageContentFields {
     required this.entitiesJson,
     required this.spansJson,
     required this.mediaJson,
+    required this.kind,
   });
 
   final String text;
   final String? entitiesJson;
   final String? spansJson;
   final String? mediaJson;
+
+  /// Recomputed on edit: an edit can change what a post *is* (text becomes a
+  /// photo), and a stale kind would leave it filtered wrongly.
+  final ContentKind kind;
 }
 
 MessageContentFields contentFieldsOf(td.MessageContent content) {
@@ -40,6 +45,7 @@ MessageContentFields contentFieldsOf(td.MessageContent content) {
     spansJson:
         text.isEmpty ? null : encodeSegments(buildTextSegments(text, entities)),
     mediaJson: _encodeMedia(content),
+    kind: contentKindOf(content),
   );
 }
 
@@ -69,7 +75,42 @@ MessagesCompanion messageToRow(td.Message message) {
     threadId: Value(message.messageThreadId == 0 ? null : message.messageThreadId),
     replyCount: Value(info?.replyInfo?.replyCount ?? 0),
     chosenReaction: Value(chosenReactionOf(info)),
+    contentKind: Value(contentKindOf(message.content)),
+    // Non-zero means an inline bot sent it — auto-posters, RSS bridges, ads.
+    viaBot: Value(message.viaBotUserId != 0),
   );
+}
+
+/// Classifies a post for the feed filters.
+///
+/// The document case is the interesting one. Telegram routinely delivers GIFs and
+/// short clips as `messageDocument` rather than `messageAnimation`/`messageVideo`,
+/// so classifying purely on the TDLib content type would file real content as
+/// "document" and the feed filter would then hide it. The mime type is the
+/// reliable signal, with the filename as a fallback for the servers that send
+/// `application/octet-stream`.
+ContentKind contentKindOf(td.MessageContent content) => switch (content) {
+      td.MessageText() => ContentKind.text,
+      td.MessagePhoto() => ContentKind.photo,
+      td.MessageVideo() => ContentKind.video,
+      td.MessageAnimation() => ContentKind.animation,
+      td.MessageAudio() => ContentKind.audio,
+      td.MessageVoiceNote() => ContentKind.voice,
+      td.MessagePoll() => ContentKind.poll,
+      td.MessageDocument(:final document) => _documentKind(document),
+      _ => ContentKind.other,
+    };
+
+ContentKind _documentKind(td.Document document) {
+  final mime = document.mimeType.toLowerCase();
+  final name = document.fileName.toLowerCase();
+
+  if (mime == 'image/gif' || name.endsWith('.gif')) return ContentKind.animation;
+  if (mime.startsWith('video/') || name.endsWith('.mp4')) {
+    return ContentKind.video;
+  }
+  if (mime.startsWith('audio/')) return ContentKind.audio;
+  return ContentKind.document;
 }
 
 /// Text and caption live on different content types; both are the same thing to
@@ -175,6 +216,15 @@ String? _encodeMedia(td.MessageContent content) {
         'w': video.width,
         'h': video.height,
         'duration': video.duration,
+        // A real JPEG poster, not the 32px minithumbnail. Shown instead of a blur
+        // whenever the video is not playing.
+        if (video.thumbnail != null) ...{
+          'posterId': video.thumbnail!.file.id,
+          'posterRemote': video.thumbnail!.file.remote.id,
+        },
+        // Telegram marks files whose moov atom is at the front. Those can be
+        // played from a partial prefix; the rest need the whole file.
+        'streamable': video.supportsStreaming,
         // Drives the autoplay threshold. `expectedSize` is what TDLib knows
         // before a byte is fetched, which is exactly when the decision is made.
         'bytes': video.video.size > 0
@@ -192,6 +242,10 @@ String? _encodeMedia(td.MessageContent content) {
         },
         'fileId': animation.animation.id,
         'remote': animation.animation.remote.id,
+        if (animation.thumbnail != null) ...{
+          'posterId': animation.thumbnail!.file.id,
+          'posterRemote': animation.thumbnail!.file.remote.id,
+        },
         'w': animation.width,
         'h': animation.height,
         'bytes': animation.animation.size > 0
@@ -200,9 +254,25 @@ String? _encodeMedia(td.MessageContent content) {
       };
 
     case td.MessageDocument(:final document):
+      final kind = _documentKind(document);
       media = {
-        'type': 'document',
+        // A document that is really a GIF or clip must present as playable, or it
+        // would render as a filename row and never reach the video pipeline.
+        'type': switch (kind) {
+          ContentKind.animation => 'animation',
+          ContentKind.video => 'video',
+          _ => 'document',
+        },
         'name': document.fileName,
+        if (document.minithumbnail != null) ...{
+          'thumb': document.minithumbnail!.data,
+          'tw': document.minithumbnail!.width,
+          'th': document.minithumbnail!.height,
+        },
+        'bytes': document.document.size > 0
+            ? document.document.size
+            : document.document.expectedSize,
+        'remote': document.document.remote.id,
         'fileId': document.document.id,
       };
 

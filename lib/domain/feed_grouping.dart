@@ -44,9 +44,46 @@ final class AlbumPost extends FeedItem {
 /// `date DESC` ordering; scanning the whole list for matches instead would let a
 /// coincidental id collision across distant dates fuse unrelated posts.
 ///
-/// A group split across a pagination boundary simply renders as two cards. That
-/// is a cosmetic edge case, not a correctness one.
-List<FeedItem> groupFeedEntries(List<FeedEntry> entries) {
+/// When [mayHaveMore] is true, a trailing run that shares a `grouped_id` is
+/// **held back** rather than rendered.
+///
+/// Without that, an album straddling a page boundary renders as two cards: the
+/// members on this page, then the rest when the next page arrives. Buffering the
+/// incomplete tail costs one partial album's worth of latency and makes the split
+/// invisible. The buffered entries stay in the caller's list, so the pagination
+/// cursor is unaffected.
+List<FeedItem> groupFeedEntries(
+  List<FeedEntry> entries, {
+  bool mayHaveMore = false,
+}) {
+  final usable = mayHaveMore ? _withoutTrailingAlbum(entries) : entries;
+  return _group(usable);
+}
+
+/// Drops the trailing entries that belong to the same album as the last one.
+///
+/// Only trims when the run could plausibly continue — a run already longer than
+/// any real album, or one that starts the list, is rendered as-is rather than
+/// hidden forever.
+List<FeedEntry> _withoutTrailingAlbum(List<FeedEntry> entries) {
+  if (entries.isEmpty) return entries;
+
+  final groupedId = entries.last.message.groupedId;
+  if (groupedId == null) return entries;
+
+  var cut = entries.length;
+  while (cut > 0 &&
+      entries[cut - 1].message.groupedId == groupedId &&
+      entries[cut - 1].message.chatId == entries.last.message.chatId) {
+    cut--;
+  }
+
+  // Never hide everything: if the whole page is one album, showing a partial
+  // carousel beats showing nothing.
+  return cut == 0 ? entries : entries.sublist(0, cut);
+}
+
+List<FeedItem> _group(List<FeedEntry> entries) {
   final items = <FeedItem>[];
   var index = 0;
 

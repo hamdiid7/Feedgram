@@ -9,6 +9,13 @@
 # packages, and plugins designed to encourage good coding practices.
 include: package:flutter_lints/flutter.yaml
 
+analyzer:
+  exclude:
+    # Read-only design reference (a whole second Flutter app). It has its own
+    # pubspec and its own lint baseline, so analysing it here reports thousands
+    # of unresolved-import errors that say nothing about this project.
+    - inspo/**
+
 linter:
   # The lint rules applied to this project can be customized in the
   # section below to disable rules from the `package:flutter_lints/flutter.yaml`

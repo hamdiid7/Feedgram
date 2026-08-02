@@ -6,6 +6,7 @@ import '../../data/app_database.dart';
 import '../../data/message_repository.dart';
 import '../../domain/feed_grouping.dart';
 import '../app_scope.dart';
+import '../motion.dart';
 import 'post_card.dart';
 
 /// The Following feed: every tracked channel merged, strict reverse-chronological.
@@ -33,14 +34,30 @@ class ChronologicalFeed extends StatefulWidget {
 
   final String? emptyMessage;
 
+  /// A big first page so the feed is immediately scrollable, then smaller ones —
+  /// the first load is the only one the user waits on.
+  static const firstPageSize = 100;
+  static const pageSize = 50;
+
+  /// Channel profiles open with a page the same size as a subsequent one: a
+  /// single channel's history is shallower and the screen is entered deliberately.
+  static const profileFirstPageSize = 50;
+
+  /// How many cards from the end to start fetching. Waiting for the actual bottom
+  /// guarantees the user meets a spinner.
+  static const prefetchThreshold = 10;
+
   @override
   State<ChronologicalFeed> createState() => _ChronologicalFeedState();
 }
 
-class _ChronologicalFeedState extends State<ChronologicalFeed> {
-  static const _pageSize = 30;
-
-  final _scrollController = ScrollController();
+class _ChronologicalFeedState extends State<ChronologicalFeed>
+    with AutomaticKeepAliveClientMixin {
+  /// Survives being swiped away from, so returning keeps the loaded pages and
+  /// the scroll position. See the note on `ForYouFeed` — the cost there is
+  /// worse, but neither feed should reload.
+  @override
+  bool get wantKeepAlive => true;
 
   StreamSubscription<List<FeedEntry>>? _headSubscription;
 
@@ -54,6 +71,16 @@ class _ChronologicalFeedState extends State<ChronologicalFeed> {
   var _reachedEnd = false;
   var _started = false;
 
+  /// Set when a page fetch fails. A feed that silently stops loading is
+  /// indistinguishable from one that has reached the end, so this is surfaced with
+  /// a retry instead.
+  Object? _pageError;
+
+  int get _headSize =>
+      widget.chatId != null
+          ? ChronologicalFeed.profileFirstPageSize
+          : ChronologicalFeed.firstPageSize;
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -63,19 +90,16 @@ class _ChronologicalFeedState extends State<ChronologicalFeed> {
     final messages = AppScope.messagesOf(context);
     _headSubscription = messages
         .watchFeedHead(
-          limit: _pageSize,
+          limit: _headSize,
           chatId: widget.chatId,
           list: widget.list,
         )
         .listen((entries) => setState(() => _head = entries));
-
-    _scrollController.addListener(_onScroll);
   }
 
   @override
   void dispose() {
     _headSubscription?.cancel();
-    _scrollController.dispose();
     super.dispose();
   }
 
@@ -93,66 +117,178 @@ class _ChronologicalFeedState extends State<ChronologicalFeed> {
     return combined;
   }
 
-  void _onScroll() {
-    if (!_scrollController.hasClients) return;
-    final position = _scrollController.position;
-    if (position.pixels > position.maxScrollExtent - 800) {
-      _loadMore();
-    }
-  }
-
   Future<void> _loadMore() async {
-    if (_loadingMore || _reachedEnd) return;
+    if (_loadingMore || _reachedEnd || _pageError != null) return;
 
     final current = _entries;
     if (current.isEmpty) return;
 
     setState(() => _loadingMore = true);
 
+    // The cursor is the last *loaded* entry, not the last rendered one — a
+    // buffered incomplete album must not be re-fetched.
     final last = current.last.message;
-    final page = await AppScope.messagesOf(context).feedPage(
-      after: FeedCursor(date: last.date, messageId: last.messageId),
-      limit: _pageSize,
-      chatId: widget.chatId,
-      list: widget.list,
-    );
+    try {
+      final page = await AppScope.messagesOf(context).feedPage(
+        after: FeedCursor(date: last.date, messageId: last.messageId),
+        limit: ChronologicalFeed.pageSize,
+        chatId: widget.chatId,
+        list: widget.list,
+      );
 
-    if (!mounted) return;
-    setState(() {
-      _older.addAll(page);
-      _loadingMore = false;
-      // A short page is genuinely the end here: this reads the local database,
-      // not TDLib, so there is no cache-warming caveat.
-      if (page.length < _pageSize) _reachedEnd = true;
-    });
+      if (!mounted) return;
+      setState(() {
+        _older.addAll(page);
+        _loadingMore = false;
+        // A short page is genuinely the end here: this reads the local database,
+        // not TDLib, so there is no cache-warming caveat.
+        if (page.length < ChronologicalFeed.pageSize) _reachedEnd = true;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadingMore = false;
+        _pageError = e;
+      });
+    }
+  }
+
+  void _retryPage() {
+    setState(() => _pageError = null);
+    _loadMore();
+  }
+
+  /// Pull-to-refresh: actually goes to the network for this feed's channels, then
+  /// lets the watched head re-query.
+  ///
+  /// A local re-sort would be pointless — the feed is already live on the database,
+  /// so the only thing a refresh can usefully add is *new posts*. Channels are
+  /// fetched sequentially with FLOOD_WAIT respected, same as any other backfill.
+  Future<void> _refresh() async {
+    final messages = AppScope.messagesOf(context);
+    final channels = AppScope.channelsOf(context);
+
+    try {
+      final ids = widget.chatId != null
+          ? [widget.chatId!]
+          : await channels.channelIdsIn(widget.list);
+
+      await messages.refreshChannels(ids);
+
+      if (!mounted) return;
+      // Older pages are dropped: new posts change what "page 2" means, and keeping
+      // stale pages around is how duplicates appear.
+      setState(() {
+        _older.clear();
+        _reachedEnd = false;
+        _pageError = null;
+      });
+    } catch (e) {
+      if (mounted) setState(() => _pageError = e);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    // Required by AutomaticKeepAliveClientMixin.
+    super.build(context);
+
     final entries = _entries;
 
     if (entries.isEmpty) {
-      return _EmptyFeed(message: widget.emptyMessage);
+      return RefreshIndicator(
+        onRefresh: _refresh,
+        // An empty feed still needs to be pullable, so the list must be
+        // scrollable even with nothing in it.
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: [
+            SizedBox(
+              height: MediaQuery.of(context).size.height * 0.6,
+              child: _EmptyFeed(message: widget.emptyMessage),
+            ),
+          ],
+        ),
+      );
     }
 
-    // Albums collapse into one carousel card, so item count is computed after
-    // grouping rather than from the raw row count.
-    final items = groupFeedEntries(entries);
+    // Albums collapse into one carousel card, so item count comes from the grouped
+    // list. `mayHaveMore` holds back an album that is still arriving.
+    final items = groupFeedEntries(entries, mayHaveMore: !_reachedEnd);
 
-    return ListView.builder(
-      controller: _scrollController,
-      // Virtualized: only visible cards are built, and each one renders from
-      // precomputed spans.
-      itemCount: items.length + (_reachedEnd ? 0 : 1),
-      itemBuilder: (context, index) {
-        if (index >= items.length) {
-          return const Padding(
-            padding: EdgeInsets.all(24),
-            child: Center(child: CircularProgressIndicator()),
+    return RefreshIndicator(
+      onRefresh: _refresh,
+      child: ListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
+        // Virtualized: only visible cards are built, and each renders from
+        // precomputed spans.
+        itemCount: items.length + 1,
+        itemBuilder: (context, index) {
+          if (index >= items.length) return _footer();
+
+          // Prefetch by item index rather than scroll offset: card heights vary
+          // enormously here (a text post versus a photo), so a pixel threshold is
+          // a poor proxy for "nearly at the end".
+          if (index >= items.length - ChronologicalFeed.prefetchThreshold) {
+            WidgetsBinding.instance.addPostFrameCallback((_) => _loadMore());
+          }
+
+          return FeedItemEntrance(
+            key: ValueKey(items[index].key),
+            index: index,
+            child: PostCard(item: items[index]),
           );
-        }
-        return PostCard(key: ValueKey(items[index].key), item: items[index]);
-      },
+        },
+      ),
+    );
+  }
+
+  /// The three end states, told apart explicitly. A silent stop reads as a bug.
+  Widget _footer() {
+    final theme = Theme.of(context);
+
+    if (_pageError != null) {
+      return Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          children: [
+            Text('Could not load more', style: theme.textTheme.bodyMedium),
+            const SizedBox(height: 4),
+            Text(
+              '$_pageError',
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.error),
+            ),
+            const SizedBox(height: 12),
+            FilledButton.tonalIcon(
+              onPressed: _retryPage,
+              icon: const Icon(Icons.refresh, size: 18),
+              label: const Text('Retry'),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (_reachedEnd) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 24),
+        child: Center(
+          child: Text(
+            "You're all caught up",
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+        ),
+      );
+    }
+
+    return const Padding(
+      padding: EdgeInsets.all(24),
+      child: Center(child: CircularProgressIndicator()),
     );
   }
 }

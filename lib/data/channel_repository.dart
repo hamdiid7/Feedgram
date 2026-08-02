@@ -121,6 +121,42 @@ class ChannelRepository {
         );
   }
 
+  /// Removes anything that is not a real broadcast channel from both lists.
+  ///
+  /// The spec asks for this in the migration, but a migration cannot ask TDLib
+  /// what a chat *is* — the local schema never recorded chat type. So it runs as a
+  /// verification pass instead, over the ids already tracked.
+  ///
+  /// Groups, private chats and bot conversations behave nothing like channels
+  /// (no view counts, different history semantics), so a leaked one produces a
+  /// feed of noise. Membership is dropped; the cached rows stay, per the
+  /// orphans-as-cache decision.
+  Future<List<int>> purgeNonChannels() async {
+    final rows = await _db.customSelect(
+      'SELECT DISTINCT chat_id FROM channel_lists',
+      readsFrom: {_db.channelLists},
+    ).get();
+
+    final removed = <int>[];
+    for (final row in rows) {
+      final chatId = row.read<int>('chat_id');
+      try {
+        final chat = await _client.send<td.Chat>(td.GetChat(chatId: chatId));
+        if (_isChannel(chat)) continue;
+      } on TdException {
+        // Unreadable tells us nothing about its type — leave it alone rather than
+        // dropping a channel that is merely temporarily inaccessible.
+        continue;
+      }
+
+      await (_db.delete(_db.channelLists)
+            ..where((l) => l.chatId.equals(chatId)))
+          .go();
+      removed.add(chatId);
+    }
+    return removed;
+  }
+
   Future<void> removeFromList(int chatId, ChannelList list) async {
     await (_db.delete(_db.channelLists)
           ..where((l) => l.chatId.equals(chatId) & l.listName.equalsValue(list)))
@@ -231,6 +267,11 @@ class ChannelRepository {
         continue;
       }
     }
+
+    // Verify what is already tracked while TDLib is warm. Cheap (getChat is
+    // served from local cache) and it is the only place that can tell a group
+    // from a channel.
+    await purgeNonChannels();
 
     return saved;
   }

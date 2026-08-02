@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../data/app_database.dart';
 import '../data/channel_repository.dart';
+import '../data/for_you_repository.dart';
 import '../data/media_cache.dart';
 import '../data/media_repository.dart';
 import '../data/message_repository.dart';
@@ -54,6 +55,9 @@ class AppScope extends StatefulWidget {
   static PlaybackCoordinator playbackOf(BuildContext context) =>
       _of(context).playback;
 
+  static ForYouRepository forYouOf(BuildContext context) =>
+      _of(context).forYou;
+
   /// Whether feed photos upgrade themselves to full resolution while scrolling.
   ///
   /// Off means placeholder-until-tapped, which is the cheap mode the spec's
@@ -80,6 +84,7 @@ class _AppScopeState extends State<AppScope>
   MessageRepository? _messages;
   MediaRepository? _media;
   MediaCache? _mediaCache;
+  ForYouRepository? _forYou;
 
   /// Session-only: not persisted, so a restart returns to auto-loading.
   var _autoLoadImages = true;
@@ -112,6 +117,10 @@ class _AppScopeState extends State<AppScope>
       final messages = MessageRepository(client: _client, db: database);
       final media = MediaRepository(client: _client);
       final mediaCache = MediaCache(repository: media);
+      final forYou = ForYouRepository(db: database);
+      // Interaction counters drive the ranking, so the repository that applies
+      // them needs to be able to rescore.
+      messages.forYou = forYou;
 
       // Drift connects lazily, so touch the database now. SQLite reaches the app
       // through Dart build hooks — a completely different mechanism from TDLib's
@@ -126,6 +135,7 @@ class _AppScopeState extends State<AppScope>
         _messages = messages;
         _media = media;
         _mediaCache = mediaCache;
+        _forYou = forYou;
         _auth = auth;
       });
       await auth.start();
@@ -168,12 +178,14 @@ class _AppScopeState extends State<AppScope>
     final messages = _messages;
     final media = _media;
     final mediaCache = _mediaCache;
+    final forYou = _forYou;
     if (auth == null ||
         database == null ||
         channels == null ||
         messages == null ||
         media == null ||
-        mediaCache == null) {
+        mediaCache == null ||
+        forYou == null) {
       return const _Splash();
     }
     return AppScopeData(
@@ -184,6 +196,7 @@ class _AppScopeState extends State<AppScope>
       messages: messages,
       media: media,
       mediaCache: mediaCache,
+      forYou: forYou,
       playback: _playback,
       autoLoadImages: _autoLoadImages,
       setAutoLoadImages: _setAutoLoadImages,
@@ -202,6 +215,7 @@ class AppScopeData extends InheritedWidget {
     required this.messages,
     required this.media,
     required this.mediaCache,
+    required this.forYou,
     required this.playback,
     required this.autoLoadImages,
     required this.setAutoLoadImages,
@@ -215,6 +229,7 @@ class AppScopeData extends InheritedWidget {
   final MessageRepository messages;
   final MediaRepository media;
   final MediaCache mediaCache;
+  final ForYouRepository forYou;
   final PlaybackCoordinator playback;
   final bool autoLoadImages;
   final void Function(bool) setAutoLoadImages;
@@ -228,6 +243,7 @@ class AppScopeData extends InheritedWidget {
       messages != oldWidget.messages ||
       media != oldWidget.media ||
       mediaCache != oldWidget.mediaCache ||
+      forYou != oldWidget.forYou ||
       playback != oldWidget.playback ||
       autoLoadImages != oldWidget.autoLoadImages;
 }

@@ -4,6 +4,10 @@ import '../../config/seed_channels.dart';
 import '../../data/app_database.dart';
 import '../../data/channel_repository.dart';
 import '../app_scope.dart';
+import '../motion.dart';
+import '../theme.dart';
+import '../widgets/open_container_navigation.dart';
+import '../widgets/tappable.dart';
 import 'channel_feed_screen.dart';
 
 /// Tracked channels: the ones the account follows, plus any added by username.
@@ -161,15 +165,15 @@ class _ChannelsScreenState extends State<ChannelsScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Expanded(
-                  child: TextField(
+                  // M3 SearchBar rather than a bordered TextField: this is a
+                  // lookup, and the pill shape is what Android users expect for
+                  // one.
+                  child: SearchBar(
                     controller: _usernameController,
-                    enabled: !_adding,
-                    decoration: const InputDecoration(
-                      labelText: 'Add a public channel',
-                      hintText: '@channel or t.me/channel',
-                      helperText: 'Tracked without joining.',
-                      border: OutlineInputBorder(),
-                      isDense: true,
+                    hintText: 'Add a public channel',
+                    leading: const Icon(Icons.alternate_email),
+                    padding: const WidgetStatePropertyAll(
+                      EdgeInsets.symmetric(horizontal: 16),
                     ),
                     onSubmitted: (_) => _addCurated(),
                   ),
@@ -191,11 +195,22 @@ class _ChannelsScreenState extends State<ChannelsScreen> {
               ],
             ),
           ),
-          if (_notice != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Text(_notice!, style: theme.textTheme.bodySmall),
+          // Grows in place. Seeding emits a new notice every second or two, and
+          // a widget appearing and disappearing under the search bar makes the
+          // whole list jump each time.
+          AnimatedExpanded(
+            expand: _notice != null,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(18, 0, 18, 8),
+              child: AnimatedSizeSwitcher(
+                child: Text(
+                  _notice ?? '',
+                  key: ValueKey(_notice),
+                  style: theme.textTheme.bodySmall,
+                ),
+              ),
             ),
+          ),
           const Divider(),
           Expanded(
             child: StreamBuilder<List<TrackedChannel>>(
@@ -257,45 +272,67 @@ class _ChannelTile extends StatelessWidget {
     final theme = Theme.of(context);
     final channel = tracked.channel;
 
-    return ListTile(
-      onTap: () => Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => ChannelFeedScreen(channel: channel)),
-      ),
-      title: Text(channel.title.isEmpty ? 'Untitled' : channel.title),
-      subtitle: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text([
-            if (channel.username != null) '@${channel.username}',
-            '${_compact(channel.subscriberCount)} subscribers',
-            // Provenance, not membership — worth distinguishing at a glance.
-            if (channel.source == ChannelSource.subscribed) 'subscribed',
-          ].join(' · ')),
-          const SizedBox(height: 6),
-          Wrap(
-            spacing: 6,
-            children: [
-              for (final list in ChannelList.values)
-                FilterChip(
-                  label: Text(_labelFor(list)),
-                  labelStyle: theme.textTheme.labelSmall,
-                  selected: tracked.inList(list),
-                  onSelected: (value) => onToggle(list, value),
-                  visualDensity: VisualDensity.compact,
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    // Same transition as the feed's post header: the row grows into the profile.
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+      child: OpenContainerNavigation(
+        borderRadius: Shapes.card,
+        closedColor: containerColor(context),
+        openPage: ChannelFeedScreen(channel: channel),
+        button: (open) => Tappable(
+          onTap: open,
+          borderRadius: Shapes.card,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  channel.title.isEmpty ? 'Untitled' : channel.title,
+                  style: theme.textTheme.titleSmall,
                 ),
-              if (tracked.isOrphan)
-                Chip(
-                  avatar: const Icon(Icons.inventory_2_outlined, size: 14),
-                  label: const Text('cached only'),
-                  labelStyle: theme.textTheme.labelSmall,
-                  visualDensity: VisualDensity.compact,
+                const SizedBox(height: 2),
+                Text(
+                  [
+                    if (channel.username != null) channel.username!,
+                    '${_compact(channel.subscriberCount)} subscribers',
+                    // Provenance, not membership — worth distinguishing at a
+                    // glance.
+                    if (channel.source == ChannelSource.subscribed)
+                      'subscribed',
+                  ].join(' · '),
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
                 ),
-            ],
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  children: [
+                    for (final list in ChannelList.values)
+                      FilterChip(
+                        label: Text(_labelFor(list)),
+                        labelStyle: theme.textTheme.labelSmall,
+                        selected: tracked.inList(list),
+                        onSelected: (value) => onToggle(list, value),
+                        visualDensity: VisualDensity.compact,
+                        materialTapTargetSize:
+                            MaterialTapTargetSize.shrinkWrap,
+                      ),
+                    if (tracked.isOrphan)
+                      Chip(
+                        avatar: const Icon(Icons.inventory_2_outlined, size: 14),
+                        label: const Text('cached only'),
+                        labelStyle: theme.textTheme.labelSmall,
+                        visualDensity: VisualDensity.compact,
+                      ),
+                  ],
+                ),
+              ],
+            ),
           ),
-        ],
+        ),
       ),
-      isThreeLine: true,
     );
   }
 }

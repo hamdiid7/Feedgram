@@ -45,6 +45,11 @@ dependencies:
   sqlite3: ">=3.0.0 <4.0.0"
   video_player: ^2.11.1
   visibility_detector: ^0.4.0+2
+  dynamic_color: ^1.8.1
+  # Container transform (OpenContainer). The Cashew-style "the thing you tapped
+  # grows into the page" transition cannot be built from Hero + MaterialPageRoute
+  # — it needs the fade-through cross-fade this package implements.
+  animations: ^2.0.11
 
 dev_dependencies:
   flutter_test:

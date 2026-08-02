@@ -18,6 +18,35 @@ part 'app_database.g.dart';
 /// differently from "you added this"). Nothing branches on it.
 enum ChannelSource { subscribed, curated }
 
+/// What a post actually is.
+///
+/// Stored on every row rather than applied at insert time: the filter rules are
+/// expected to change, and re-backfilling 12k posts to revise a rule would be
+/// absurd. Feeds decide what to hide in SQL.
+enum ContentKind {
+  text,
+  photo,
+  video,
+  animation,
+  document,
+  audio,
+  voice,
+  poll,
+  other,
+}
+
+/// Kinds hidden from every feed.
+///
+/// Note that documents whose mime type says otherwise are classified as
+/// [ContentKind.animation] or [ContentKind.video], not [ContentKind.document] —
+/// Telegram delivers plenty of GIFs as `messageDocument`, and a blanket document
+/// filter would silently swallow them.
+const hiddenContentKinds = {
+  ContentKind.document,
+  ContentKind.audio,
+  ContentKind.voice,
+};
+
 /// Which feed a channel feeds.
 ///
 /// A channel may be in both, neither, or one. Membership is the *only* thing that
@@ -79,6 +108,24 @@ class ChannelLists extends Table {
   Set<Column> get primaryKey => {chatId, listName};
 }
 
+/// Posts already shown in For You.
+///
+/// Keyed on the post's **permanent link** rather than its row identity, so the
+/// record survives a cache wipe, a re-backfill, or TDLib handing out different
+/// local ids. Seeing something once and never again is only meaningful if the
+/// memory outlives the copy of the post it was about.
+class SeenPosts extends Table {
+  /// `t.me/<username>/<id>` for public channels, `c/<chatId>/<id>` otherwise.
+  TextColumn get link => text()();
+
+  IntColumn get chatId => integer()();
+  IntColumn get messageId => integer()();
+  IntColumn get seenAt => integer()();
+
+  @override
+  Set<Column> get primaryKey => {link};
+}
+
 @TableIndex(name: 'channels_source', columns: {#source})
 class Channels extends Table {
   /// TDLib chat ID. Channels get large negative IDs (-100…), which is why this
@@ -109,6 +156,9 @@ class Channels extends Table {
 /// sort at query time.
 @TableIndex(name: 'messages_date', columns: {#date, #messageId})
 @TableIndex(name: 'messages_grouped', columns: {#chatId, #groupedId})
+// For You reads in score order, so it needs its own index. Without it every page
+// sorts the whole window in a temp B-tree.
+@TableIndex(name: 'messages_score', columns: {#score, #messageId})
 class Messages extends Table {
   IntColumn get chatId => integer().references(Channels, #id)();
   IntColumn get messageId => integer()();
@@ -163,16 +213,35 @@ class Messages extends Table {
   /// The emoji this account reacted with, if any. Drives the like toggle.
   TextColumn get chosenReaction => text().nullable()();
 
+  /// What kind of post this is. Feeds filter on it.
+  TextColumn get contentKind => textEnum<ContentKind>()
+      .withDefault(const Constant('other'))();
+
+  /// For You ranking score: smoothed likes ÷ views. Null until a scoring pass
+  /// covers it.
+  ///
+  /// **Stored, not computed on the fly.** Keyset pagination has to compare against
+  /// a stable value; a score recomputed per query would shift under the cursor and
+  /// duplicate or skip rows exactly the way `OFFSET` does.
+  RealColumn get score => real().nullable()();
+
+  /// Sent *through* an inline bot — the auto-poster / RSS / ad pattern.
+  ///
+  /// This is `via_bot_user_id != 0` on the message, not "the sender looks like a
+  /// bot": plenty of legitimate channels have bot-ish usernames, and plenty of
+  /// spam comes from ordinary-looking ones.
+  BoolColumn get viaBot => boolean().withDefault(const Constant(false))();
+
   @override
   Set<Column> get primaryKey => {chatId, messageId};
 }
 
-@DriftDatabase(tables: [Channels, Messages, ChannelLists])
+@DriftDatabase(tables: [Channels, Messages, ChannelLists, SeenPosts])
 class AppDatabase extends _$AppDatabase {
   AppDatabase(super.e);
 
   @override
-  int get schemaVersion => 6;
+  int get schemaVersion => 9;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -235,6 +304,58 @@ class AppDatabase extends _$AppDatabase {
               "SELECT id, 'following', ?1 FROM channels",
               [now],
             );
+          }
+
+          // v7 adds the filtering columns.
+          if (from < 7) {
+            await m.addColumn(messages, messages.contentKind);
+            await m.addColumn(messages, messages.viaBot);
+
+            // Backfill `content_kind` from the media descriptor already stored on
+            // every row, so 12k existing posts classify correctly without a
+            // re-backfill. `media_json` is null for plain text.
+            await m.database.customStatement('''
+              UPDATE messages SET content_kind = CASE
+                WHEN media_json IS NULL THEN 'text'
+                WHEN json_extract(media_json, '\$.type') = 'photo' THEN 'photo'
+                WHEN json_extract(media_json, '\$.type') = 'video' THEN 'video'
+                WHEN json_extract(media_json, '\$.type') = 'animation'
+                  THEN 'animation'
+                WHEN json_extract(media_json, '\$.type') = 'poll' THEN 'poll'
+                WHEN json_extract(media_json, '\$.type') = 'document' THEN
+                  -- Telegram sends many GIFs as documents. Recover them by name
+                  -- so the document filter does not swallow real content; new
+                  -- rows get this right from the mime type instead.
+                  CASE
+                    WHEN lower(COALESCE(json_extract(media_json, '\$.name'), ''))
+                         LIKE '%.gif' THEN 'animation'
+                    WHEN lower(COALESCE(json_extract(media_json, '\$.name'), ''))
+                         LIKE '%.mp4' THEN 'video'
+                    ELSE 'document'
+                  END
+                ELSE 'other'
+              END
+            ''');
+
+            // `via_bot` cannot be recovered — it was never stored. Existing rows
+            // stay false, so already-cached auto-poster spam remains visible until
+            // those channels are backfilled again. New posts are classified
+            // correctly from the moment this ships.
+          }
+
+          // v8 adds the stored For You score.
+          if (from < 8) {
+            await m.addColumn(messages, messages.score);
+            await m.create(messagesScore);
+            // Left null on purpose: a score is only meaningful for the `for_you`
+            // pool inside the rolling window, and the first scoring pass fills it
+            // in. Backfilling a value here would invent rankings for posts that
+            // are not candidates.
+          }
+
+          // v9 remembers what For You has already shown.
+          if (from < 9) {
+            await m.createTable(seenPosts);
           }
         },
       );

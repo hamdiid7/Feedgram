@@ -39,6 +39,9 @@ class MediaState {
     this.error,
     this.attempts = 0,
     this.repaired = false,
+    this.prefixSize = 0,
+    this.totalSize = 0,
+    this.partialPath,
   });
 
   final MediaStatus status;
@@ -54,6 +57,24 @@ class MediaState {
   /// A stale local id was recovered through the persistent remote id.
   final bool repaired;
 
+  /// Contiguous bytes from the start, and the file's total size. Together these
+  /// let a player start on a partial file instead of waiting for completion.
+  final int prefixSize;
+  final int totalSize;
+
+  /// Where the partial bytes are, before the download completes.
+  final String? partialPath;
+
+  /// Enough of the front of the file to hand to a decoder.
+  ///
+  /// A fraction rather than a fixed byte count: an MP4's header scales with
+  /// duration, so 512 KB is generous for a 15-second clip and thin for a
+  /// ten-minute one.
+  bool get hasPlayablePrefix =>
+      partialPath != null &&
+      totalSize > 0 &&
+      prefixSize >= (totalSize * 0.15).clamp(256 * 1024, 4 * 1024 * 1024);
+
   bool get isDone => status == MediaStatus.done && path != null;
 
   /// Terminal failure. The UI must offer an explicit retry — a blur placeholder
@@ -68,6 +89,9 @@ class MediaState {
     Object? error,
     int? attempts,
     bool? repaired,
+    int? prefixSize,
+    int? totalSize,
+    String? partialPath,
   }) {
     return MediaState(
       status: status ?? this.status,
@@ -77,6 +101,9 @@ class MediaState {
       error: error ?? this.error,
       attempts: attempts ?? this.attempts,
       repaired: repaired ?? this.repaired,
+      prefixSize: prefixSize ?? this.prefixSize,
+      totalSize: totalSize ?? this.totalSize,
+      partialPath: partialPath ?? this.partialPath,
     );
   }
 }
@@ -262,6 +289,9 @@ class MediaCache {
         notifier.value = notifier.value.copyWith(
           progress: download.progress,
           downloadedSize: download.downloadedSize,
+          prefixSize: download.prefixSize,
+          totalSize: download.totalSize,
+          partialPath: download.partialPath,
         );
 
         // Only *new bytes* count as alive. Repeated updates at the same size mean

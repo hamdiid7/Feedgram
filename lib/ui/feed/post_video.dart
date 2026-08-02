@@ -13,12 +13,23 @@ import 'post_media.dart';
 /// Inline video and GIF playback.
 ///
 /// Telegram "animations" are silent MP4, not GIF, so both go through the same
-/// player; the difference is that animations are small, always muted, and looped,
-/// while videos are size-gated and can be opened fullscreen with sound.
+/// player; the difference is that animations are small and always muted, while
+/// videos are size-gated and can be opened fullscreen with sound.
 ///
-/// The controller is created **only** while [PlaybackCoordinator] grants this
-/// item a slot, and disposed the moment the grant is withdrawn. That is what keeps
-/// the number of live decoders bounded no matter how fast the feed scrolls.
+/// Three behaviours worth spelling out:
+///
+/// * **A paused video shows its poster frame, not a blur.** Scrolling past simply
+///   stops playback — no pause icon, no placeholder swap. The poster is a real
+///   JPEG from TDLib rather than the 32px minithumbnail, which is what used to make
+///   a stopped video look out of focus.
+/// * **Playback starts on a partial file.** Waiting for a complete download meant
+///   staring at a still image for the length of the transfer; now it begins once
+///   enough of the front of the file exists to decode.
+/// * **While there is nothing to show yet, a spinner** — never a permanent
+///   placeholder pretending to be content.
+///
+/// The controller exists only while [PlaybackCoordinator] grants this item a slot,
+/// which is what keeps live decoders bounded however fast the feed scrolls.
 class PostVideoView extends StatefulWidget {
   const PostVideoView({
     super.key,
@@ -34,9 +45,9 @@ class PostVideoView extends StatefulWidget {
 
   final VoidCallback? onTap;
 
-  /// Above this, a video is never downloaded or autoplayed — it shows a
-  /// thumbnail with tap-to-play instead. Autoplaying a 50 MB clip while scrolling
-  /// is exactly the runaway data use the spec warns about.
+  /// Above this, a video is never downloaded or autoplayed — it shows a poster
+  /// with tap-to-play instead. Autoplaying a 50 MB clip while scrolling is exactly
+  /// the runaway data use the spec warns about.
   static const autoplayByteLimit = 10 * 1024 * 1024;
 
   @override
@@ -48,18 +59,22 @@ class _PostVideoViewState extends State<PostVideoView> {
   PlaybackCoordinator? _coordinator;
   MediaCache? _cache;
   MediaRef? _ref;
+  MediaRef? _posterRef;
+  ValueListenable<MediaState>? _mediaState;
 
   var _initialising = false;
 
-  bool get _granted => _coordinator?.isGranted(widget.postKey) ?? false;
+  /// Path the current controller was built on. Kept so a controller started on a
+  /// partial file can be rebuilt once the complete one lands.
+  String? _openedPath;
+  var _openedPartial = false;
 
-  /// GIFs are small and silent, so they behave like images: fetched eagerly and
-  /// looped whenever they get a slot.
+  bool get _granted => _coordinator?.isGranted(widget.postKey) ?? false;
   bool get _isAnimation => widget.media.type == 'animation';
 
-  /// Videos above the limit are strictly tap-to-play.
   bool get _mayAutoplay =>
-      _isAnimation || (widget.media.byteSize ?? 0) <= PostVideoView.autoplayByteLimit;
+      _isAnimation ||
+      (widget.media.byteSize ?? 0) <= PostVideoView.autoplayByteLimit;
 
   @override
   void didChangeDependencies() {
@@ -67,26 +82,30 @@ class _PostVideoViewState extends State<PostVideoView> {
 
     _coordinator?.removeListener(_onGrantChanged);
     _coordinator = AppScope.playbackOf(context)..addListener(_onGrantChanged);
-    _cache = AppScope.mediaCacheOf(context);
+    final cache = AppScope.mediaCacheOf(context);
+    _cache = cache;
 
-    // Only fetch what could actually play. A large video is left alone until the
-    // user asks for it.
+    // The poster is small and always worth having: it is what the card shows
+    // whenever playback is not running.
+    final poster = widget.media.posterRef;
+    if (poster != null && _posterRef != poster) {
+      _posterRef = poster;
+      cache.request(poster);
+    }
+
     if (_mayAutoplay && AppScope.autoLoadImagesOf(context)) {
       final ref = widget.media.refFor(double.infinity);
       if (ref != null && _ref != ref) {
         _detachMediaListener();
         _ref = ref;
-        // Playback usually loses the race against the download: the slot is
-        // granted while the file is still arriving. Without listening for the
-        // file, `_ensurePlaying` bails on a null path and nothing ever tries
-        // again — which presents exactly as "video never autoplays".
-        _mediaState = _cache!.stateOf(ref)..addListener(_onMediaChanged);
-        _cache!.request(ref);
+        // Playback usually loses the race against the download, so the file has to
+        // be watched. Without this, `_ensurePlaying` bails on a null path and
+        // nothing ever tries again.
+        _mediaState = cache.stateOf(ref)..addListener(_onMediaChanged);
+        cache.request(ref);
       }
     }
   }
-
-  ValueListenable<MediaState>? _mediaState;
 
   void _detachMediaListener() {
     _mediaState?.removeListener(_onMediaChanged);
@@ -95,51 +114,69 @@ class _PostVideoViewState extends State<PostVideoView> {
 
   void _onMediaChanged() {
     if (!mounted) return;
-    if (_coordinator?.isGranted(widget.postKey) ?? false) _ensurePlaying();
+    if (_granted) _ensurePlaying();
   }
 
   void _onGrantChanged() {
-    final granted = _coordinator?.isGranted(widget.postKey) ?? false;
-    if (granted) {
+    if (_granted) {
       _ensurePlaying();
     } else {
-      _teardown();
+      _pause();
     }
   }
 
-  /// Why playback has not started, for the debug overlay. A silent failure here
-  /// is indistinguishable from "autoplay is broken", which cost real time to
-  /// diagnose once already.
-  String? _blocked;
+  /// Best path to play right now: the complete file if it exists, otherwise a
+  /// prefix long enough to decode.
+  ({String path, bool partial})? _playablePath() {
+    final ref = _ref;
+    if (ref == null) return null;
+    final state = _cache?.stateOf(ref).value;
+    if (state == null) return null;
+
+    final complete = state.path;
+    if (complete != null && File(complete).existsSync()) {
+      return (path: complete, partial: false);
+    }
+
+    // Only files TDLib marks streamable have their moov atom at the front; for the
+    // rest a prefix is undecodable and trying wastes a decoder init.
+    if (!widget.media.streamable && !_isAnimation) return null;
+
+    final partial = state.partialPath;
+    if (state.hasPlayablePrefix && partial != null && File(partial).existsSync()) {
+      return (path: partial, partial: true);
+    }
+    return null;
+  }
 
   Future<void> _ensurePlaying() async {
-    if (_controller != null || _initialising || !_mayAutoplay) return;
+    if (_initialising || !_mayAutoplay) return;
 
-    final ref = _ref;
-    if (ref == null) {
-      _note('no file reference');
+    final target = _playablePath();
+    if (target == null) return;
+
+    // Already playing this exact file, and not on a partial that has since
+    // completed.
+    if (_controller != null &&
+        _openedPath == target.path &&
+        !(_openedPartial && !target.partial)) {
+      if (!_controller!.value.isPlaying) await _controller!.play();
       return;
     }
-    final path = _cache?.stateOf(ref).value.path;
-    // Autoplay requires the file on disk; streaming a partial file is what
-    // produces decoder errors.
-    if (path == null) {
-      _note('waiting for download');
-      return;
-    }
-    if (!File(path).existsSync()) {
-      _note('file missing on disk');
-      return;
-    }
+
+    // The complete file arrived while a partial was playing: rebuild on it and
+    // resume where it was, so buffering is invisible rather than a restart.
+    final resumeAt = _openedPartial && !target.partial
+        ? _controller?.value.position
+        : null;
 
     _initialising = true;
-    final controller = VideoPlayerController.file(File(path));
+    final previous = _controller;
+    final controller = VideoPlayerController.file(File(target.path));
 
     try {
       await controller.initialize();
-      // The grant can be withdrawn while initialize() is in flight — scrolling is
-      // faster than decoder setup. Without this check the player would leak.
-      if (!mounted || !(_coordinator?.isGranted(widget.postKey) ?? false)) {
+      if (!mounted || !_granted) {
         await controller.dispose();
         return;
       }
@@ -147,41 +184,41 @@ class _PostVideoViewState extends State<PostVideoView> {
       // Inline playback is always silent, video included. Sound only ever starts
       // from an explicit tap into fullscreen.
       await controller.setVolume(0);
+      if (resumeAt != null) await controller.seekTo(resumeAt);
       await controller.play();
       if (!mounted) {
         await controller.dispose();
         return;
       }
+
       setState(() {
         _controller = controller;
-        _blocked = null;
+        _openedPath = target.path;
+        _openedPartial = target.partial;
       });
+      // Swapped only after the replacement is running, so there is no gap.
+      await previous?.dispose();
     } catch (e) {
       await controller.dispose();
-      // Emulators in particular fail to initialise hardware decoders; on a real
-      // device this is where a genuinely unplayable file shows up.
       debugPrint('[playback] initialize failed for ${widget.postKey}: $e');
-      if (mounted) {
-        setState(() {
-          _blocked = 'decoder failed: $e';
-        });
-      }
     } finally {
       _initialising = false;
     }
   }
 
-  void _note(String reason) {
-    if (_blocked == reason || !mounted) return;
-    setState(() => _blocked = reason);
-  }
-
-  void _teardown() {
+  /// Stops playback without tearing the frame down.
+  ///
+  /// The controller *is* disposed — the decoder budget requires it — but the poster
+  /// underneath is a real frame, so the card keeps looking like the video rather
+  /// than reverting to a blur.
+  void _pause() {
     final controller = _controller;
     if (controller == null) return;
-    setState(() => _controller = null);
-    // pause before dispose so the decoder is released promptly rather than at the
-    // end of the frame.
+    setState(() {
+      _controller = null;
+      _openedPath = null;
+      _openedPartial = false;
+    });
     controller.pause().whenComplete(controller.dispose);
   }
 
@@ -197,15 +234,14 @@ class _PostVideoViewState extends State<PostVideoView> {
   @override
   Widget build(BuildContext context) {
     final controller = _controller;
+    final poster = _posterRef;
 
     return VisibilityDetector(
       key: ValueKey('playback:${widget.postKey}'),
       onVisibilityChanged: (info) {
         if (!mounted) return;
         _coordinator?.report(widget.postKey, info.visibleFraction);
-        // A newly granted item may already have its file; the grant listener only
-        // fires on change, so poke it here too.
-        if (_coordinator?.isGranted(widget.postKey) ?? false) _ensurePlaying();
+        if (_granted) _ensurePlaying();
       },
       child: GestureDetector(
         onTap: widget.onTap,
@@ -216,9 +252,16 @@ class _PostVideoViewState extends State<PostVideoView> {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                // The still frame stays mounted underneath: swapping it out for the
-                // player would flash empty space on every grant change.
-                PostMediaView(media: widget.media, onTap: widget.onTap),
+                // Poster underneath at all times. It is what a stopped video shows,
+                // and it stops the player's first frame arriving over blank space.
+                if (poster != null)
+                  _Poster(
+                    state: _cache!.stateOf(poster),
+                    fallback: widget.media.thumbBytes,
+                  )
+                else
+                  PostMediaView(media: widget.media, onTap: widget.onTap),
+
                 if (controller != null)
                   FittedBox(
                     fit: BoxFit.cover,
@@ -228,43 +271,17 @@ class _PostVideoViewState extends State<PostVideoView> {
                       child: VideoPlayer(controller),
                     ),
                   ),
-                if (controller == null || !_mayAutoplay)
-                  _PlayBadge(
-                    label: _isAnimation
-                        ? 'GIF'
-                        : _mayAutoplay
-                            ? null
-                            : _sizeLabel(widget.media.byteSize),
-                  ),
-                if (!_isAnimation && controller != null)
-                  const Positioned(
-                    right: 8,
-                    bottom: 8,
-                    child: _MutedBadge(),
-                  ),
-                // Debug-only: says *why* a playable post is not playing. Without
-                // this the three distinct causes — no grant, no file, dead
-                // decoder — all look identical on screen.
-                if (kDebugMode && controller == null && _blocked != null)
-                  Positioned(
-                    left: 8,
-                    bottom: 8,
-                    child: DecoratedBox(
-                      decoration: const BoxDecoration(
-                        color: Colors.black54,
-                        borderRadius: BorderRadius.all(Radius.circular(8)),
-                      ),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 6, vertical: 3),
-                        child: Text(
-                          _granted ? _blocked! : 'no slot · $_blocked',
-                          style: const TextStyle(
-                              color: Colors.white70, fontSize: 10),
-                        ),
-                      ),
-                    ),
-                  ),
+
+                // A spinner only while there is genuinely nothing playable yet.
+                // Deliberately no pause icon: a stopped video should read as a
+                // still frame, not as a control waiting to be pressed.
+                if (controller == null && _mayAutoplay && _ref != null)
+                  _LoadingVeil(state: _cache!.stateOf(_ref!)),
+
+                // Oversized videos never autoplay, so they keep an explicit
+                // affordance.
+                if (!_mayAutoplay)
+                  _TapToPlay(label: _sizeLabel(widget.media.byteSize)),
               ],
             ),
           ),
@@ -274,14 +291,70 @@ class _PostVideoViewState extends State<PostVideoView> {
   }
 }
 
-String? _sizeLabel(int? bytes) {
-  if (bytes == null || bytes <= 0) return null;
-  final mb = bytes / (1024 * 1024);
-  return '${mb.toStringAsFixed(mb >= 10 ? 0 : 1)} MB';
+/// Sharp poster frame, falling back to the inline minithumbnail until it arrives.
+class _Poster extends StatelessWidget {
+  const _Poster({required this.state, required this.fallback});
+
+  final ValueListenable<MediaState> state;
+  final Uint8List? fallback;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<MediaState>(
+      valueListenable: state,
+      builder: (context, value, _) {
+        final path = value.path;
+        if (path != null && File(path).existsSync()) {
+          return Image.file(File(path), fit: BoxFit.cover, gaplessPlayback: true);
+        }
+        if (fallback != null) {
+          return Image.memory(
+            fallback!,
+            fit: BoxFit.cover,
+            filterQuality: FilterQuality.low,
+            gaplessPlayback: true,
+          );
+        }
+        return ColoredBox(color: Theme.of(context).colorScheme.surfaceContainerHighest);
+      },
+    );
+  }
 }
 
-class _PlayBadge extends StatelessWidget {
-  const _PlayBadge({this.label});
+/// Circular progress over the poster while the file is still arriving.
+class _LoadingVeil extends StatelessWidget {
+  const _LoadingVeil({required this.state});
+
+  final ValueListenable<MediaState> state;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<MediaState>(
+      valueListenable: state,
+      builder: (context, value, _) {
+        if (value.isDone) return const SizedBox.shrink();
+
+        return Center(
+          child: SizedBox(
+            height: 34,
+            width: 34,
+            child: CircularProgressIndicator(
+              strokeWidth: 2.5,
+              color: Colors.white,
+              backgroundColor: Colors.white24,
+              // Determinate once there is a size to measure against, so a slow
+              // transfer visibly moves instead of spinning forever.
+              value: value.progress > 0 ? value.progress : null,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _TapToPlay extends StatelessWidget {
+  const _TapToPlay({this.label});
 
   final String? label;
 
@@ -294,7 +367,7 @@ class _PlayBadge extends StatelessWidget {
           borderRadius: BorderRadius.all(Radius.circular(24)),
         ),
         child: Padding(
-          padding: EdgeInsets.symmetric(horizontal: label == null ? 10 : 14, vertical: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -312,21 +385,8 @@ class _PlayBadge extends StatelessWidget {
   }
 }
 
-/// Inline video is muted, so say so — otherwise a silent clip reads as broken.
-class _MutedBadge extends StatelessWidget {
-  const _MutedBadge();
-
-  @override
-  Widget build(BuildContext context) {
-    return const DecoratedBox(
-      decoration: BoxDecoration(
-        color: Colors.black54,
-        borderRadius: BorderRadius.all(Radius.circular(12)),
-      ),
-      child: Padding(
-        padding: EdgeInsets.all(6),
-        child: Icon(Icons.volume_off, color: Colors.white, size: 14),
-      ),
-    );
-  }
+String? _sizeLabel(int? bytes) {
+  if (bytes == null || bytes <= 0) return null;
+  final mb = bytes / (1024 * 1024);
+  return '${mb.toStringAsFixed(mb >= 10 ? 0 : 1)} MB';
 }

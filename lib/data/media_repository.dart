@@ -12,6 +12,9 @@ class MediaDownload {
     this.localPath,
     this.progress = 0,
     this.downloadedSize = 0,
+    this.prefixSize = 0,
+    this.totalSize = 0,
+    this.partialPath,
   });
 
   final int fileId;
@@ -21,6 +24,20 @@ class MediaDownload {
 
   /// 0..1, best effort.
   final double progress;
+
+  /// Contiguous bytes from the start of the file.
+  ///
+  /// Distinct from [downloadedSize], which counts every downloaded byte wherever
+  /// it landed. Only a *prefix* can be handed to a decoder, so this is what
+  /// decides whether playback can begin before the download finishes.
+  final int prefixSize;
+
+  /// Total file size when known.
+  final int totalSize;
+
+  /// Path to the partially-written file, usable once [prefixSize] is large enough
+  /// for the container's header.
+  final String? partialPath;
 
   /// Bytes on disk so far. The scheduler watches this rather than the clock: a
   /// slow transfer is still a live one, and only a *stalled* byte count means
@@ -188,6 +205,9 @@ class MediaRepository {
             fileId: fileId,
             progress: _progressOf(file),
             downloadedSize: file.local.downloadedSize,
+            prefixSize: file.local.downloadedPrefixSize,
+            totalSize: file.size > 0 ? file.size : file.expectedSize,
+            partialPath: file.local.path,
           ));
         }
       });
@@ -225,6 +245,9 @@ class MediaRepository {
             fileId: fileId,
             progress: _progressOf(file),
             downloadedSize: file.local.downloadedSize,
+            prefixSize: file.local.downloadedPrefixSize,
+            totalSize: file.size > 0 ? file.size : file.expectedSize,
+            partialPath: file.local.path,
           ));
         }
       } catch (e) {
