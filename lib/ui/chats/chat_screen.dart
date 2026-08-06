@@ -7,9 +7,8 @@ import '../theme.dart';
 
 /// One conversation: history, and a box to reply.
 ///
-/// Read-only for channels. A channel in the chats list is something you follow,
-/// and the composer would either fail or — on a channel you can post to — publish
-/// to its subscribers, which is not what a reply box implies.
+/// Always writable. The list this is opened from is private chats only, so there
+/// is no read-only case left to handle — a channel can no longer arrive here.
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key, required this.chat});
 
@@ -105,14 +104,11 @@ class _ChatScreenState extends State<ChatScreen> {
       body: Column(
         children: [
           Expanded(child: _body(context)),
-          if (widget.chat.isChannel)
-            _ReadOnlyNotice()
-          else
-            _Composer(
-              controller: _composer,
-              sending: _sending,
-              onSend: _send,
-            ),
+          _Composer(
+            controller: _composer,
+            sending: _sending,
+            onSend: _send,
+          ),
         ],
       ),
     );
@@ -214,43 +210,6 @@ class _Bubble extends StatelessWidget {
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-/// Channels get a note instead of a composer.
-class _ReadOnlyNotice extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    return Container(
-      width: double.infinity,
-      color: containerColor(context),
-      padding: EdgeInsets.fromLTRB(
-        18,
-        12,
-        18,
-        12 + MediaQuery.paddingOf(context).bottom,
-      ),
-      child: Row(
-        children: [
-          Icon(
-            Icons.campaign_outlined,
-            size: 16,
-            color: theme.colorScheme.onSurfaceVariant,
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              'Channel — read only',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }

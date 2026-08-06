@@ -12,7 +12,6 @@ class ChatSummary {
     required this.lastMessage,
     required this.lastMessageDate,
     required this.unreadCount,
-    required this.isChannel,
   });
 
   final int id;
@@ -23,11 +22,6 @@ class ChatSummary {
 
   final int lastMessageDate;
   final int unreadCount;
-
-  /// Channels are shown differently: this app is a channel reader, so a channel
-  /// appearing in the chats list is something you *follow*, not someone you talk
-  /// to, and offering a composer for it would be misleading.
-  final bool isChannel;
 }
 
 /// One message in a conversation.
@@ -59,13 +53,16 @@ class ChatRepository {
 
   final TelegramClient _client;
 
-  /// Conversations, most recent first — channels excluded.
+  /// One-to-one chats, most recent first. Nothing else.
   ///
-  /// A channel is a feed, and this app already has two of those. Leaving them in
-  /// here meant the list was mostly the same channels shown on the Feed tab,
-  /// drowning the handful of chats that are actually conversations.
+  /// Private chats only — no channels, no supergroups, no basic groups. This
+  /// account follows enough channels that they buried the handful of real
+  /// conversations, and groups did the same on a smaller scale. Channels already
+  /// have two whole tabs of their own.
   ///
-  /// Groups stay: they are things you take part in, not things you subscribe to.
+  /// Secret chats are excluded too: they are bound to the device that created
+  /// them, so surfacing them from a second client mostly produces rows that
+  /// cannot be read.
   ///
   /// `loadChats` first: `getChats` only answers from what TDLib has already
   /// loaded into memory, so on a cold start it returns a short list or nothing at
@@ -96,9 +93,10 @@ class ChatRepository {
         final chat = await _client.send<td.Chat>(td.GetChat(chatId: id));
         final last = chat.lastMessage;
 
-        final isChannel = chat.type is td.ChatTypeSupergroup &&
-            (chat.type as td.ChatTypeSupergroup).isChannel;
-        if (isChannel) continue;
+        // Whitelist rather than a list of exclusions: TDLib gains chat types
+        // over time, and "everything except the three I thought of" would let a
+        // new one back into a list that is supposed to be people.
+        if (chat.type is! td.ChatTypePrivate) continue;
 
         summaries.add(ChatSummary(
           id: chat.id,
@@ -107,7 +105,6 @@ class ChatRepository {
               last == null ? '' : _preview(contentFieldsOf(last.content)),
           lastMessageDate: last?.date ?? 0,
           unreadCount: chat.unreadCount,
-          isChannel: isChannel,
         ));
       } catch (_) {
         // One inaccessible chat must not empty the whole list.

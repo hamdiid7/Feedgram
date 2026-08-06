@@ -140,14 +140,6 @@ class _ChatRow extends StatelessWidget {
                     children: [
                       Row(
                         children: [
-                          if (chat.isChannel) ...[
-                            Icon(
-                              Icons.campaign_outlined,
-                              size: 14,
-                              color: theme.colorScheme.onSurfaceVariant,
-                            ),
-                            const SizedBox(width: 4),
-                          ],
                           Expanded(
                             child: Text(
                               chat.title.isEmpty ? 'Untitled' : chat.title,
