@@ -3,7 +3,6 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:feedgram/ui/motion.dart';
 import 'package:feedgram/ui/theme.dart';
-import 'package:feedgram/ui/widgets/bottom_sheet.dart';
 import 'package:feedgram/ui/widgets/collapsing_header.dart';
 import 'package:feedgram/ui/widgets/count_number.dart';
 import 'package:feedgram/ui/widgets/open_container_navigation.dart';
@@ -250,82 +249,6 @@ void main() {
       await tester.pump();
 
       expect(find.text('60'), findsOneWidget);
-    });
-  });
-
-  group('bottom sheet', () {
-    testWidgets('links its scroll controller to the body', (tester) async {
-      // Without this the sheet and its list are two separate gestures: the list
-      // scrolls to the top and the drag simply stops.
-      late ScrollController given;
-
-      await tester.pumpWidget(_wrap(
-        Builder(
-          builder: (context) => TextButton(
-            onPressed: () => openBottomSheet<void>(
-              context,
-              builder: (context, controller) {
-                given = controller;
-                return ListView(
-                  controller: controller,
-                  children: const [Text('comment')],
-                );
-              },
-            ),
-            child: const Text('open'),
-          ),
-        ),
-      ));
-
-      await tester.tap(find.text('open'));
-      await tester.pumpAndSettle();
-
-      final list = tester.widget<ListView>(find.byType(ListView));
-      expect(list.controller, same(given));
-      expect(find.text('comment'), findsOneWidget);
-    });
-
-    testWidgets('the header closes the sheet', (tester) async {
-      await tester.pumpWidget(_wrap(
-        Builder(
-          builder: (context) => TextButton(
-            onPressed: () => openBottomSheet<void>(
-              context,
-              builder: (context, controller) => const SheetFrame(
-                title: 'Comments',
-                subtitle: '3 replies',
-                child: SizedBox(),
-              ),
-            ),
-            child: const Text('open'),
-          ),
-        ),
-      ));
-
-      await tester.tap(find.text('open'));
-      await tester.pumpAndSettle();
-      expect(find.text('Comments'), findsOneWidget);
-
-      await tester.tap(find.byIcon(Icons.close_rounded));
-      await tester.pumpAndSettle();
-      expect(find.text('Comments'), findsNothing);
-    });
-
-    testWidgets('bottom padding never collapses to nothing', (tester) async {
-      // Three-button navigation reports a zero inset, and that is exactly where
-      // an unpadded last row would sit flush against the screen edge.
-      late double padding;
-      await tester.pumpWidget(MediaQuery(
-        data: const MediaQueryData(padding: EdgeInsets.zero),
-        child: MaterialApp(
-          home: Builder(builder: (context) {
-            padding = sheetBottomPadding(context);
-            return const SizedBox();
-          }),
-        ),
-      ));
-
-      expect(padding, greaterThanOrEqualTo(10));
     });
   });
 

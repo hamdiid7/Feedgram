@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../telegram/auth/auth_status.dart';
 import '../app_scope.dart';
-import '../home_screen.dart';
+import '../root_shell.dart';
 import 'code_screen.dart';
 import 'password_screen.dart';
 import 'phone_screen.dart';
@@ -12,7 +12,7 @@ import 'status_screen.dart';
 ///
 /// There is no navigation stack here on purpose. TDLib owns the sequence, so the
 /// UI is a pure function of the state it reports — which is also why a restart
-/// on a live session lands on [HomeScreen] with no login screens flashing past.
+/// on a live session lands on [RootShell] with no login screens flashing past.
 class AuthGate extends StatelessWidget {
   const AuthGate({super.key});
 
@@ -33,7 +33,7 @@ class AuthGate extends StatelessWidget {
           AuthStage.needPhone => PhoneScreen(status: status, auth: auth),
           AuthStage.needCode => CodeScreen(status: status, auth: auth),
           AuthStage.needPassword => PasswordScreen(status: status, auth: auth),
-          AuthStage.ready => const HomeScreen(),
+          AuthStage.ready => const RootShell(),
           AuthStage.unsupported => StatusScreen(
               title: 'Not supported',
               message: status.message,

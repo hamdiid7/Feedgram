@@ -30,15 +30,47 @@ import 'post_media.dart';
 ///
 /// The controller exists only while [PlaybackCoordinator] grants this item a slot,
 /// which is what keeps live decoders bounded however fast the feed scrolls.
+/// Either an aspect-ratio card with rounded corners, or a plain fill.
+class _Frame extends StatelessWidget {
+  const _Frame({
+    required this.fill,
+    required this.aspectRatio,
+    required this.child,
+  });
+
+  final bool fill;
+  final double aspectRatio;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (fill) return child;
+    return AspectRatio(
+      aspectRatio: aspectRatio,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: child,
+      ),
+    );
+  }
+}
+
 class PostVideoView extends StatefulWidget {
   const PostVideoView({
     super.key,
     required this.media,
     required this.postKey,
     this.onTap,
+    this.fill = false,
+    this.autoplayLimit = autoplayByteLimit,
   });
 
   final PostMedia media;
+
+  /// Fills its parent instead of taking the clip's aspect ratio, and drops the
+  /// rounded corners. For Shorts, where the video *is* the screen — a card shape
+  /// and a letterboxed aspect ratio both look like a bug at full bleed.
+  final bool fill;
 
   /// Stable identity for this post, used as the coordinator's slot key.
   final String postKey;
@@ -49,6 +81,18 @@ class PostVideoView extends StatefulWidget {
   /// with tap-to-play instead. Autoplaying a 50 MB clip while scrolling is exactly
   /// the runaway data use the spec warns about.
   static const autoplayByteLimit = 10 * 1024 * 1024;
+
+  /// Shorts' allowance. Far higher than the feed's, because there the video is
+  /// incidental to reading and here it is the entire reason you opened the tab —
+  /// a screen of posters with play buttons is a broken short-video feed.
+  ///
+  /// Still a limit, not unlimited: channels in this account post whole films as
+  /// video, and the 1 GB and 1.8 GB files already seen would otherwise start
+  /// downloading the moment one scrolled past.
+  static const shortsByteLimit = 150 * 1024 * 1024;
+
+  /// The size above which this instance refuses to autoplay.
+  final int autoplayLimit;
 
   @override
   State<PostVideoView> createState() => _PostVideoViewState();
@@ -73,8 +117,7 @@ class _PostVideoViewState extends State<PostVideoView> {
   bool get _isAnimation => widget.media.type == 'animation';
 
   bool get _mayAutoplay =>
-      _isAnimation ||
-      (widget.media.byteSize ?? 0) <= PostVideoView.autoplayByteLimit;
+      _isAnimation || (widget.media.byteSize ?? 0) <= widget.autoplayLimit;
 
   @override
   void didChangeDependencies() {
@@ -245,11 +288,10 @@ class _PostVideoViewState extends State<PostVideoView> {
       },
       child: GestureDetector(
         onTap: widget.onTap,
-        child: AspectRatio(
+        child: _Frame(
+          fill: widget.fill,
           aspectRatio: widget.media.aspectRatio,
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(12),
-            child: Stack(
+          child: Stack(
               fit: StackFit.expand,
               children: [
                 // Poster underneath at all times. It is what a stopped video shows,
@@ -283,7 +325,6 @@ class _PostVideoViewState extends State<PostVideoView> {
                 if (!_mayAutoplay)
                   _TapToPlay(label: _sizeLabel(widget.media.byteSize)),
               ],
-            ),
           ),
         ),
       ),

@@ -244,6 +244,30 @@ class AuthController extends ChangeNotifier {
     _set(const AuthStatus(stage: AuthStage.needPhone));
   }
 
+  /// Signs out of Telegram for real.
+  ///
+  /// `logOut` ends the session **server-side**: this device disappears from the
+  /// account's active-session list and the next launch needs a fresh login code.
+  /// That is deliberately not the same as [resetLocalSession], which only clears
+  /// this device and leaves the session valid.
+  ///
+  /// Not reversible, and not free — each new login burns an SMS code, and doing
+  /// it repeatedly is exactly what trips Telegram's flood limits. The UI asks
+  /// before calling this.
+  ///
+  /// TDLib drives the rest itself: `logOut` makes it emit
+  /// `authorizationStateLoggingOut` and then `authorizationStateClosed`, so the
+  /// state machine walks back to the login screen without this method steering
+  /// it — the same principle as every other transition here.
+  Future<void> signOut() async {
+    _set(_status.copyWith(busy: true, clearMessage: true));
+    try {
+      await _client.send<td.Ok>(const td.LogOut());
+    } on TdException catch (e) {
+      _set(AuthStatus(stage: AuthStage.failed, message: 'Sign out failed: $e'));
+    }
+  }
+
   /// Dev reset: closes TDLib, then deletes the local database and files.
   ///
   /// Not `logOut` — that invalidates the session server-side and burns a fresh

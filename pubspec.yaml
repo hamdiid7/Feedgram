@@ -46,6 +46,9 @@ dependencies:
   video_player: ^2.11.1
   visibility_detector: ^0.4.0+2
   dynamic_color: ^1.8.1
+  # Settings persistence. Nothing in the app survived a restart before this —
+  # a theme choice that reverts on every launch is worse than no choice.
+  shared_preferences: ^2.3.0
   # Container transform (OpenContainer). The Cashew-style "the thing you tapped
   # grows into the page" transition cannot be built from Hero + MaterialPageRoute
   # — it needs the fade-through cross-fade this package implements.

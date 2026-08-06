@@ -7,6 +7,7 @@ import '../../data/message_repository.dart';
 import '../../domain/feed_grouping.dart';
 import '../app_scope.dart';
 import '../motion.dart';
+import '../widgets/floating_nav_bar.dart';
 import 'post_card.dart';
 
 /// The Following feed: every tracked channel merged, strict reverse-chronological.
@@ -198,6 +199,7 @@ class _ChronologicalFeedState extends State<ChronologicalFeed>
     if (entries.isEmpty) {
       return RefreshIndicator(
         onRefresh: _refresh,
+        edgeOffset: MediaQuery.paddingOf(context).top,
         // An empty feed still needs to be pullable, so the list must be
         // scrollable even with nothing in it.
         child: ListView(
@@ -218,8 +220,17 @@ class _ChronologicalFeedState extends State<ChronologicalFeed>
 
     return RefreshIndicator(
       onRefresh: _refresh,
+      // Clear of the floating header, which is what the top inset measures.
+      // Left at zero the spinner appears behind the pills.
+      edgeOffset: MediaQuery.paddingOf(context).top,
       child: ListView.builder(
         physics: const AlwaysScrollableScrollPhysics(),
+        // Top comes from the MediaQuery inset the floating header sets; bottom
+        // clears the floating nav bar, so the last card is not stuck behind it.
+        padding: EdgeInsets.only(
+          top: MediaQuery.paddingOf(context).top,
+          bottom: FloatingNavBar.spaceFor(context),
+        ),
         // Virtualized: only visible cards are built, and each renders from
         // precomputed spans.
         itemCount: items.length + 1,
@@ -236,7 +247,12 @@ class _ChronologicalFeedState extends State<ChronologicalFeed>
           return FeedItemEntrance(
             key: ValueKey(items[index].key),
             index: index,
-            child: PostCard(item: items[index]),
+            child: PostCard(
+              item: items[index],
+              // Scoped to one channel means you are already on its profile, so
+              // the header would push a second copy of this very screen.
+              linkChannel: widget.chatId == null,
+            ),
           );
         },
       ),

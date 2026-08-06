@@ -593,6 +593,70 @@ class MessageRepository {
     ];
   }
 
+  /// Video and GIF posts only, newest first — the Shorts feed.
+  ///
+  /// Deliberately not scoped to a membership list. Shorts is a browsing surface
+  /// rather than a subscription: restricting it to Following would leave it empty
+  /// for anyone whose video channels sit in For You, and the two feeds already
+  /// cover the "only what I chose" case.
+  ///
+  /// Ordered by date rather than by score. A ranked short-video feed sounds
+  /// appealing until you notice the ranking is tuned on views-per-reaction for
+  /// *text* posts, which says nothing useful about a clip.
+  Future<List<FeedEntry>> videoPosts({int limit = 60, int? beforeDate}) async {
+    final query = _db.select(_db.messages).join([
+      innerJoin(_db.channels, _db.channels.id.equalsExp(_db.messages.chatId)),
+    ])
+      ..where(
+        _db.messages.contentKind.isIn([
+          ContentKind.video.name,
+          ContentKind.animation.name,
+        ]),
+      )
+      // A clip with no file cached and no thumbnail would be a black screen you
+      // cannot swipe past fast enough.
+      ..where(_db.messages.mediaJson.isNotNull())
+      ..where(_db.messages.viaBot.equals(false))
+      ..orderBy([OrderingTerm.desc(_db.messages.date)])
+      ..limit(limit);
+
+    if (beforeDate != null) {
+      query.where(_db.messages.date.isSmallerThanValue(beforeDate));
+    }
+
+    return _mapRows(await query.get());
+  }
+
+  /// Posts a comment on a channel post.
+  ///
+  /// Two calls, and the first is not optional. A channel post has no comments of
+  /// its own — the comments live in a *linked discussion group*, a different chat
+  /// entirely. `getMessageThread` is what maps a post to that chat and to the
+  /// thread inside it; sending to the channel's own id would either fail or, on a
+  /// channel you can post to, publish a new post instead of a reply.
+  Future<void> sendComment(int chatId, int messageId, String text) async {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+
+    final thread = await _client.send<td.MessageThreadInfo>(
+      td.GetMessageThread(chatId: chatId, messageId: messageId),
+    );
+
+    await _client.send<td.Message>(
+      td.SendMessage(
+        chatId: thread.chatId,
+        messageThreadId: thread.messageThreadId,
+        inputMessageContent: td.InputMessageText(
+          // Entities left empty: this is a plain composer, and anything the user
+          // typed that looks like markup should stay literal rather than being
+          // silently reinterpreted.
+          text: td.FormattedText(text: trimmed, entities: const []),
+          clearDraft: true,
+        ),
+      ),
+    );
+  }
+
   Future<int> countMessages() async {
     final count = _db.messages.messageId.count();
     final row = await (_db.selectOnly(

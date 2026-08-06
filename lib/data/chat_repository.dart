@@ -1,0 +1,195 @@
+import 'package:handy_tdlib/api.dart' as td;
+
+import '../telegram/telegram_client.dart';
+import 'app_database.dart';
+import 'message_mapping.dart';
+
+/// One row in the chats list.
+class ChatSummary {
+  const ChatSummary({
+    required this.id,
+    required this.title,
+    required this.lastMessage,
+    required this.lastMessageDate,
+    required this.unreadCount,
+    required this.isChannel,
+  });
+
+  final int id;
+  final String title;
+
+  /// A one-line preview. Empty when the chat has no messages yet.
+  final String lastMessage;
+
+  final int lastMessageDate;
+  final int unreadCount;
+
+  /// Channels are shown differently: this app is a channel reader, so a channel
+  /// appearing in the chats list is something you *follow*, not someone you talk
+  /// to, and offering a composer for it would be misleading.
+  final bool isChannel;
+}
+
+/// One message in a conversation.
+class ChatMessage {
+  const ChatMessage({
+    required this.id,
+    required this.date,
+    required this.isOutgoing,
+    required this.fields,
+  });
+
+  final int id;
+  final int date;
+
+  /// Sent by you, which is what puts it on the right of the thread.
+  final bool isOutgoing;
+
+  final MessageContentFields fields;
+}
+
+/// The chats list and one conversation at a time.
+///
+/// Separate from [MessageRepository] on purpose. That one owns the *feed*: it
+/// persists channel posts to SQLite, ranks them and pages them with a keyset.
+/// Conversations are read straight from TDLib and never stored — a chat is a live
+/// thing you scroll to the bottom of, not a corpus to query.
+class ChatRepository {
+  ChatRepository({required TelegramClient client}) : _client = client;
+
+  final TelegramClient _client;
+
+  /// Conversations, most recent first — channels excluded.
+  ///
+  /// A channel is a feed, and this app already has two of those. Leaving them in
+  /// here meant the list was mostly the same channels shown on the Feed tab,
+  /// drowning the handful of chats that are actually conversations.
+  ///
+  /// Groups stay: they are things you take part in, not things you subscribe to.
+  ///
+  /// `loadChats` first: `getChats` only answers from what TDLib has already
+  /// loaded into memory, so on a cold start it returns a short list or nothing at
+  /// all. Asking it to load is what makes the first open of this tab show
+  /// something. The 404 is expected and means "nothing more to load".
+  Future<List<ChatSummary>> chats({int limit = 40}) async {
+    // Over-fetch: channels are filtered out below and they outnumber
+    // conversations here, so asking for exactly `limit` chats would return a
+    // handful of rows once they are dropped.
+    final fetch = limit * 4;
+    try {
+      await _client.send<td.Ok>(
+        td.LoadChats(chatList: const td.ChatListMain(), limit: fetch),
+      );
+    } catch (_) {
+      // 404 = the list is fully loaded already. Any other failure still leaves
+      // getChats below able to answer from cache.
+    }
+
+    final chats = await _client.send<td.Chats>(
+      td.GetChats(chatList: const td.ChatListMain(), limit: fetch),
+    );
+
+    final summaries = <ChatSummary>[];
+    for (final id in chats.chatIds) {
+      if (summaries.length >= limit) break;
+      try {
+        final chat = await _client.send<td.Chat>(td.GetChat(chatId: id));
+        final last = chat.lastMessage;
+
+        final isChannel = chat.type is td.ChatTypeSupergroup &&
+            (chat.type as td.ChatTypeSupergroup).isChannel;
+        if (isChannel) continue;
+
+        summaries.add(ChatSummary(
+          id: chat.id,
+          title: chat.title,
+          lastMessage:
+              last == null ? '' : _preview(contentFieldsOf(last.content)),
+          lastMessageDate: last?.date ?? 0,
+          unreadCount: chat.unreadCount,
+          isChannel: isChannel,
+        ));
+      } catch (_) {
+        // One inaccessible chat must not empty the whole list.
+      }
+    }
+
+    return summaries;
+  }
+
+  /// Newest messages in a chat, oldest first so the list reads top to bottom.
+  Future<List<ChatMessage>> history(int chatId, {int limit = 50}) async {
+    final messages = await _client.send<td.Messages>(
+      td.GetChatHistory(
+        chatId: chatId,
+        fromMessageId: 0,
+        offset: 0,
+        limit: limit,
+        onlyLocal: false,
+      ),
+    );
+
+    return [
+      // TDLib answers newest-first; a conversation reads the other way.
+      for (final message in messages.messages.reversed)
+        ChatMessage(
+          id: message.id,
+          date: message.date,
+          isOutgoing: message.isOutgoing,
+          fields: contentFieldsOf(message.content),
+        ),
+    ];
+  }
+
+  /// Sends a plain text message.
+  Future<void> send(int chatId, String text) async {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+
+    await _client.send<td.Message>(
+      td.SendMessage(
+        chatId: chatId,
+        messageThreadId: 0,
+        inputMessageContent: td.InputMessageText(
+          // No entities: what was typed stays literal rather than having
+          // anything that looks like markup silently reinterpreted.
+          text: td.FormattedText(text: trimmed, entities: const []),
+          clearDraft: true,
+        ),
+      ),
+    );
+  }
+
+  /// Marks the chat read, so the unread badge in the list clears.
+  Future<void> markRead(int chatId, Iterable<int> messageIds) async {
+    if (messageIds.isEmpty) return;
+    try {
+      await _client.send<td.Ok>(td.ViewMessages(
+        chatId: chatId,
+        messageIds: messageIds.toList(),
+        source: null,
+        forceRead: true,
+      ));
+    } catch (_) {
+      // Cosmetic. A badge that stays put is not worth surfacing an error for.
+    }
+  }
+
+  /// One line for the list. Media without a caption still needs to say
+  /// *something*, or a photo-only chat shows a blank row.
+  String _preview(MessageContentFields fields) {
+    final text = fields.text.trim();
+    if (text.isNotEmpty) return text.replaceAll('\n', ' ');
+    return switch (fields.kind) {
+      ContentKind.photo => 'Photo',
+      ContentKind.video => 'Video',
+      ContentKind.animation => 'GIF',
+      ContentKind.document => 'File',
+      ContentKind.audio => 'Audio',
+      ContentKind.voice => 'Voice message',
+      ContentKind.poll => 'Poll',
+      ContentKind.text => '',
+      ContentKind.other => '',
+    };
+  }
+}

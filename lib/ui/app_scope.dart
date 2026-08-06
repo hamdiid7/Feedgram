@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 
 import '../data/app_database.dart';
 import '../data/channel_repository.dart';
+import '../data/chat_repository.dart';
 import '../data/for_you_repository.dart';
 import '../data/media_cache.dart';
 import '../data/media_repository.dart';
 import '../data/message_repository.dart';
+import '../data/settings_store.dart';
+import '../data/storage_repository.dart';
 import '../telegram/auth/auth_controller.dart';
 import '../telegram/td_paths.dart';
 import '../telegram/telegram_client.dart';
@@ -18,11 +21,21 @@ import 'feed/playback_coordinator.dart';
 /// addressed by a client ID created once, and a second one would mean a second
 /// database handle on the same directory.
 class AppScope extends StatefulWidget {
-  const AppScope({super.key, required this.playback, required this.builder});
+  const AppScope({
+    super.key,
+    required this.playback,
+    required this.settings,
+    required this.builder,
+  });
 
   /// Owned above this widget so the navigator observer in `main.dart` can also
   /// reach it.
   final PlaybackCoordinator playback;
+
+  /// Owned above this widget, like [playback] — `MaterialApp` needs it for
+  /// `themeMode`, and one store shared with the app means a change made here
+  /// reaches the theme instead of two copies disagreeing.
+  final SettingsStore settings;
 
   final Widget Function(BuildContext context) builder;
 
@@ -47,6 +60,8 @@ class AppScope extends StatefulWidget {
   static MessageRepository messagesOf(BuildContext context) =>
       _of(context).messages;
 
+  static ChatRepository chatsOf(BuildContext context) => _of(context).chats;
+
   static MediaRepository mediaOf(BuildContext context) => _of(context).media;
 
   static MediaCache mediaCacheOf(BuildContext context) =>
@@ -68,6 +83,12 @@ class AppScope extends StatefulWidget {
   static void setAutoLoadImages(BuildContext context, bool value) =>
       _of(context).setAutoLoadImages(value);
 
+  static SettingsStore settingsOf(BuildContext context) =>
+      _of(context).settings;
+
+  static StorageRepository storageOf(BuildContext context) =>
+      _of(context).storage;
+
   @override
   State<AppScope> createState() => _AppScopeState();
 }
@@ -85,9 +106,7 @@ class _AppScopeState extends State<AppScope>
   MediaRepository? _media;
   MediaCache? _mediaCache;
   ForYouRepository? _forYou;
-
-  /// Session-only: not persisted, so a restart returns to auto-loading.
-  var _autoLoadImages = true;
+  StorageRepository? _storage;
   Object? _error;
 
   @override
@@ -118,6 +137,7 @@ class _AppScopeState extends State<AppScope>
       final media = MediaRepository(client: _client);
       final mediaCache = MediaCache(repository: media);
       final forYou = ForYouRepository(db: database);
+      final storage = StorageRepository(client: _client);
       // Interaction counters drive the ranking, so the repository that applies
       // them needs to be able to rescore.
       messages.forYou = forYou;
@@ -136,8 +156,14 @@ class _AppScopeState extends State<AppScope>
         _media = media;
         _mediaCache = mediaCache;
         _forYou = forYou;
+        _storage = storage;
         _auth = auth;
       });
+
+      // The saved data preferences have to reach the playback coordinator, or
+      // autoplay would ignore a data-saver setting restored from last launch.
+      _settings.addListener(_applyDataSettings);
+      _applyDataSettings();
       await auth.start();
 
       // Live updates must be running before the feed is shown, so a post that
@@ -149,16 +175,22 @@ class _AppScopeState extends State<AppScope>
     }
   }
 
-  void _setAutoLoadImages(bool value) {
-    if (_autoLoadImages == value) return;
-    setState(() => _autoLoadImages = value);
-    // Cheap mode covers video too, or the toggle would still burn data.
-    _playback.autoplayEnabled = value;
+  /// Pushes the saved data preferences into the playback coordinator and
+  /// rebuilds anything reading them through the scope.
+  SettingsStore get _settings => widget.settings;
+
+  void _applyDataSettings() {
+    _playback.autoplayEnabled = _settings.autoplayVideo;
+    if (mounted) setState(() {});
   }
+
+  void _setAutoLoadImages(bool value) => _settings.setAutoLoadImages(value);
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    // Removed but not disposed: owned above this widget.
+    _settings.removeListener(_applyDataSettings);
     // Not disposed here — it is owned by the app above this widget.
     _mediaCache?.dispose();
     _auth?.dispose();
@@ -179,13 +211,18 @@ class _AppScopeState extends State<AppScope>
     final media = _media;
     final mediaCache = _mediaCache;
     final forYou = _forYou;
+    final storage = _storage;
+    // Built here rather than in the bootstrap: it holds no database handle and
+    // no state, only the client, so there is nothing to set up asynchronously.
+    final chats = ChatRepository(client: _client);
     if (auth == null ||
         database == null ||
         channels == null ||
         messages == null ||
         media == null ||
         mediaCache == null ||
-        forYou == null) {
+        forYou == null ||
+        storage == null) {
       return const _Splash();
     }
     return AppScopeData(
@@ -194,11 +231,14 @@ class _AppScopeState extends State<AppScope>
       database: database,
       channels: channels,
       messages: messages,
+      chats: chats,
       media: media,
       mediaCache: mediaCache,
       forYou: forYou,
+      settings: _settings,
+      storage: storage,
       playback: _playback,
-      autoLoadImages: _autoLoadImages,
+      autoLoadImages: _settings.autoLoadImages,
       setAutoLoadImages: _setAutoLoadImages,
       child: Builder(builder: widget.builder),
     );
@@ -213,9 +253,12 @@ class AppScopeData extends InheritedWidget {
     required this.database,
     required this.channels,
     required this.messages,
+    required this.chats,
     required this.media,
     required this.mediaCache,
     required this.forYou,
+    required this.settings,
+    required this.storage,
     required this.playback,
     required this.autoLoadImages,
     required this.setAutoLoadImages,
@@ -227,9 +270,12 @@ class AppScopeData extends InheritedWidget {
   final AppDatabase database;
   final ChannelRepository channels;
   final MessageRepository messages;
+  final ChatRepository chats;
   final MediaRepository media;
   final MediaCache mediaCache;
   final ForYouRepository forYou;
+  final SettingsStore settings;
+  final StorageRepository storage;
   final PlaybackCoordinator playback;
   final bool autoLoadImages;
   final void Function(bool) setAutoLoadImages;
@@ -244,6 +290,8 @@ class AppScopeData extends InheritedWidget {
       media != oldWidget.media ||
       mediaCache != oldWidget.mediaCache ||
       forYou != oldWidget.forYou ||
+      settings != oldWidget.settings ||
+      storage != oldWidget.storage ||
       playback != oldWidget.playback ||
       autoLoadImages != oldWidget.autoLoadImages;
 }

@@ -6,6 +6,7 @@ import '../../data/message_repository.dart';
 import '../../domain/feed_grouping.dart';
 import '../app_scope.dart';
 import '../motion.dart';
+import '../widgets/floating_nav_bar.dart';
 import 'chronological_feed.dart';
 import 'post_card.dart';
 
@@ -150,6 +151,7 @@ class _ForYouFeedState extends State<ForYouFeed>
     if (_entries.isEmpty) {
       return RefreshIndicator(
         onRefresh: _refresh,
+        edgeOffset: MediaQuery.paddingOf(context).top,
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
           children: [
@@ -166,8 +168,17 @@ class _ForYouFeedState extends State<ForYouFeed>
 
     return RefreshIndicator(
       onRefresh: _refresh,
+      // Clear of the floating header, which is what the top inset measures.
+      // Left at zero the spinner appears behind the pills.
+      edgeOffset: MediaQuery.paddingOf(context).top,
       child: ListView.builder(
         physics: const AlwaysScrollableScrollPhysics(),
+        // Top comes from the MediaQuery inset the floating header sets; bottom
+        // clears the floating nav bar, so the last card is not stuck behind it.
+        padding: EdgeInsets.only(
+          top: MediaQuery.paddingOf(context).top,
+          bottom: FloatingNavBar.spaceFor(context),
+        ),
         itemCount: items.length + 1,
         itemBuilder: (context, index) {
           if (index >= items.length) return _footer();

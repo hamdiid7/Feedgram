@@ -41,10 +41,8 @@ class FeedSelector extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
-      // The same tint the post cards carry, so the strip belongs to the feed
-      // rather than sitting above it as a white block. Left plain, the band
-      // between the title bar and the first card read as a hard white gap.
-      color: containerColor(context),
+      // No fill of its own: the strip sits inside the frosted header, which
+      // supplies the translucent white and the blur behind these pills.
       alignment: AlignmentDirectional.centerStart,
       padding: const EdgeInsetsDirectional.fromSTEB(12, 4, 12, 10),
       child: Row(
