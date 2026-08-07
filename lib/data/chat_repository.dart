@@ -53,6 +53,10 @@ class ChatRepository {
 
   final TelegramClient _client;
 
+  /// Ceiling on how many chats are examined per load, whatever the caller asks
+  /// for. One `getChat` each, so this is the worst-case round-trip count.
+  static const _maxScan = 120;
+
   /// One-to-one chats, most recent first. Nothing else.
   ///
   /// Private chats only — no channels, no supergroups, no basic groups. This
@@ -69,10 +73,13 @@ class ChatRepository {
   /// all. Asking it to load is what makes the first open of this tab show
   /// something. The 404 is expected and means "nothing more to load".
   Future<List<ChatSummary>> chats({int limit = 40}) async {
-    // Over-fetch: channels are filtered out below and they outnumber
-    // conversations here, so asking for exactly `limit` chats would return a
-    // handful of rows once they are dropped.
-    final fetch = limit * 4;
+    // Over-fetch, but bounded. Channels are filtered out below and they
+    // outnumber conversations badly on this account, so asking for exactly
+    // `limit` would return a handful of rows once they are dropped. The cap
+    // matters as much as the multiplier: every id costs a `getChat`, and an
+    // unbounded scan is a long serial stall on a cold cache — which is exactly
+    // what a spinner that never resolves looks like.
+    final fetch = (limit * 4).clamp(0, _maxScan);
     try {
       await _client.send<td.Ok>(
         td.LoadChats(chatList: const td.ChatListMain(), limit: fetch),
@@ -87,8 +94,10 @@ class ChatRepository {
     );
 
     final summaries = <ChatSummary>[];
+    var scanned = 0;
     for (final id in chats.chatIds) {
-      if (summaries.length >= limit) break;
+      if (summaries.length >= limit || scanned >= _maxScan) break;
+      scanned++;
       try {
         final chat = await _client.send<td.Chat>(td.GetChat(chatId: id));
         final last = chat.lastMessage;
