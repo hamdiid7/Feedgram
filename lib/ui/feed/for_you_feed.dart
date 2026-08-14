@@ -15,6 +15,9 @@ import 'post_card.dart';
 /// Ordered by the **stored** `score` column, so paging uses a `(score, message_id)`
 /// keyset. That is the whole reason the score is persisted rather than computed per
 /// query — a value that changed between pages would shift under the cursor.
+///
+/// **The feed does not end.** Exhausting the pool recycles the seen history and
+/// serves the ranking again from the top rather than stopping — see [_recycle].
 class ForYouFeed extends StatefulWidget {
   const ForYouFeed({super.key});
 
@@ -66,8 +69,12 @@ class _ForYouFeedState extends State<ForYouFeed>
       // Scores go stale as the window slides, so a pass runs before the first
       // read rather than trusting whatever the last backfill left behind.
       await forYou.recomputeScores();
-      final page =
-          await forYou.page(limit: ChronologicalFeed.firstPageSize);
+      var page = await forYou.page(limit: ChronologicalFeed.firstPageSize);
+      // Opening the app on a pool that was exhausted last session should not
+      // greet the reader with the empty state.
+      if (page.isEmpty) {
+        page = await _recycle(forYou, limit: ChronologicalFeed.firstPageSize);
+      }
 
       if (!mounted) return;
       setState(() {
@@ -75,7 +82,7 @@ class _ForYouFeedState extends State<ForYouFeed>
           ..clear()
           ..addAll(page);
         _cursor = ForYouRepository.cursorFrom(page);
-        _reachedEnd = page.length < ChronologicalFeed.firstPageSize;
+        _reachedEnd = page.isEmpty;
         _loading = false;
       });
     } catch (e) {
@@ -93,16 +100,25 @@ class _ForYouFeedState extends State<ForYouFeed>
     setState(() => _loadingMore = true);
 
     try {
-      final page = await AppScope.forYouOf(context).page(
+      final forYou = AppScope.forYouOf(context);
+      var page = await forYou.page(
         after: _cursor,
         limit: ChronologicalFeed.pageSize,
       );
+      if (page.isEmpty) {
+        page = await _recycle(forYou, limit: ChronologicalFeed.pageSize);
+      }
 
       if (!mounted) return;
       setState(() {
         _entries.addAll(page);
         _cursor = ForYouRepository.cursorFrom(page) ?? _cursor;
-        _reachedEnd = page.length < ChronologicalFeed.pageSize;
+        // A *short* page is not the end here, unlike the chronological feed:
+        // `page()` caps each channel at ForYouWeights.maxPerPage rows, so a page
+        // can never exceed 3 x (channels in for_you) however large the limit.
+        // Below ~34 channels the first page is always short, and treating that
+        // as the end stopped the feed after a handful of posts.
+        _reachedEnd = page.isEmpty;
         _loadingMore = false;
       });
     } catch (e) {
@@ -112,6 +128,28 @@ class _ForYouFeedState extends State<ForYouFeed>
         _error = e;
       });
     }
+  }
+
+  /// Restarts the ranking from the top once every unseen post is used up.
+  ///
+  /// This is what makes For You endless. The seen-post exclusion is what stops the
+  /// feed repeating itself, so it is also what eventually empties it; clearing that
+  /// history and re-serving from the best post down is the only way to continue
+  /// without new posts arriving.
+  ///
+  /// Guarded on the pool actually holding something, so a reader with no channels
+  /// still reaches the empty state instead of looping on an empty query forever.
+  ///
+  /// `_pendingSeen` is deliberately left alone: those cards are flushed *after*
+  /// this clears the table, which keeps the last few off the recycled page and
+  /// stops the seam from repeating what is still on screen.
+  Future<List<FeedEntry>> _recycle(
+    ForYouRepository forYou, {
+    required int limit,
+  }) async {
+    if (await forYou.countCandidates() == 0) return const [];
+    await forYou.forgetSeen();
+    return forYou.page(limit: limit);
   }
 
   /// Pull-to-refresh fetches new posts for the pool, rescores, and restarts from

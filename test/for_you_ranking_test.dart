@@ -335,6 +335,57 @@ void main() {
 
       expect(seen.toSet(), hasLength(seen.length), reason: 'no duplicates');
     });
+
+    test('a short page is not the end of the feed', () async {
+      // Three channels x maxPerPage 3 means a page can never exceed nine rows,
+      // however large the limit. ForYouFeed used to read that shortfall as
+      // "exhausted" and stop after one page, stranding everything below.
+      for (final chatId in [-1, -2, -3]) {
+        await channel(chatId);
+        for (var i = 0; i < 40; i++) {
+          await post(
+              chatId: chatId, messageId: -chatId * 1000 + i,
+              views: 10000, likes: 2000 - i * 10 + chatId);
+        }
+      }
+
+      final r = repo();
+      await r.recomputeScores(nowSeconds: now);
+
+      final first = await r.page(limit: 100, nowSeconds: now);
+      expect(first, hasLength(lessThan(100)),
+          reason: 'the per-channel cap makes a full page impossible here');
+      expect(first, isNotEmpty);
+
+      // The posts the short page did not reach are still there, which is what
+      // makes ending on a short page wrong.
+      final next = await r.page(
+          after: ForYouRepository.cursorFrom(first),
+          limit: 100,
+          nowSeconds: now);
+      expect(next, isNotEmpty,
+          reason: 'a short page must not be treated as exhaustion');
+    });
+
+    test('an exhausted pool refills once the seen history is forgotten',
+        () async {
+      await channel(-1);
+      for (var i = 0; i < 3; i++) {
+        await post(chatId: -1, messageId: 100 + i, views: 10000, likes: 500 - i);
+      }
+
+      final r = repo();
+      await r.recomputeScores(nowSeconds: now);
+
+      await r.markSeen(await r.page(nowSeconds: now));
+      expect(await r.page(nowSeconds: now), isEmpty);
+
+      // What ForYouFeed._recycle relies on to keep the feed endless: candidates
+      // outlive the seen history, so clearing it serves them again.
+      expect(await r.countCandidates(nowSeconds: now), greaterThan(0));
+      await r.forgetSeen();
+      expect(await r.page(nowSeconds: now), hasLength(3));
+    });
   });
 
   group('rescoring', () {
