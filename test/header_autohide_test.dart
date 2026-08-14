@@ -33,9 +33,19 @@ class _ShellState extends State<_Shell> {
     setState(() => _headerHeight = height);
   }
 
+  var _switchingFeed = false;
+
   bool _onScroll(ScrollNotification notification) {
-    if (notification.depth == 0) return false;
+    if (notification.depth == 0) {
+      if (notification is ScrollStartNotification) {
+        _switchingFeed = true;
+      } else if (notification is ScrollEndNotification) {
+        _switchingFeed = false;
+      }
+      return false;
+    }
     if (notification.metrics.axis != Axis.vertical) return false;
+    if (_switchingFeed) return false;
 
     if (notification is ScrollUpdateNotification) {
       final delta = notification.scrollDelta ?? 0;
@@ -68,7 +78,11 @@ class _ShellState extends State<_Shell> {
                       itemBuilder: (context, i) =>
                           SizedBox(height: 120, child: Text('post $i')),
                     ),
-                    const SizedBox(),
+                    ListView.builder(
+                      itemCount: 40,
+                      itemBuilder: (context, i) =>
+                          SizedBox(height: 120, child: Text('other $i')),
+                    ),
                   ],
                 ),
               ),

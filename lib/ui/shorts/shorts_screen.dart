@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../data/app_database.dart';
 import '../../data/message_repository.dart';
 import '../app_scope.dart';
 import '../feed/post_media.dart';
@@ -9,10 +10,17 @@ import '../motion.dart';
 
 /// Shorts: one video per screen, swiped vertically.
 ///
-/// Reads the same cached posts as the feeds, filtered to video and GIF. Nothing
-/// new is downloaded to fill it — a browsing surface that pulls fresh clips on
-/// every swipe is exactly the runaway data use the rest of the app is careful to
-/// avoid, so this shows what is already there.
+/// Reads the same cached posts as the feeds, filtered to video and GIF.
+///
+/// Normally that cache is already full and this tab opens instantly. When it is
+/// empty — a first run, or a login that has not scrolled a feed yet — it fetches
+/// once on open rather than showing an empty screen, because "no videos" reads as
+/// broken when the real answer is "nothing has been downloaded yet".
+///
+/// That one pass is the only fetch. Swiping never pulls more clips down: a
+/// browsing surface that hits the network on every swipe is exactly the runaway
+/// data use the rest of the app is careful to avoid. Paging past the first page
+/// comes out of the database.
 class ShortsScreen extends StatefulWidget {
   const ShortsScreen({super.key});
 
@@ -33,6 +41,22 @@ class _ShortsScreenState extends State<ShortsScreen>
   Object? _error;
   var _started = false;
   var _index = 0;
+  var _loadingMore = false;
+  var _reachedEnd = false;
+
+  /// True while the first pass is out fetching history to find clips.
+  var _fetching = false;
+
+  /// How many clips ahead of the current one to keep loaded.
+  ///
+  /// Vertical swipes land far faster than a page can be fetched, so waiting for
+  /// the last one would mean hitting the end of the list mid-flick.
+  static const _prefetchThreshold = 8;
+
+  /// Pulled per page rather than all at once: this reads every video the app has
+  /// cached, across every channel, and on a well-stocked library that is
+  /// thousands of rows.
+  static const _pageSize = 60;
 
   @override
   void didChangeDependencies() {
@@ -49,11 +73,82 @@ class _ShortsScreenState extends State<ShortsScreen>
   }
 
   Future<void> _load() async {
+    final messages = AppScope.messagesOf(context);
+    final channels = AppScope.channelsOf(context);
+
     try {
-      final entries = await AppScope.messagesOf(context).videoPosts();
-      if (mounted) setState(() => _entries = entries);
-    } catch (e) {
+      var entries = await messages.videoPosts(limit: _pageSize);
+
+      // Nothing cached: go and get some rather than showing an empty screen and
+      // telling the reader to go pull posts themselves. Videos only reach the
+      // database when a channel's history has been fetched, and on a first run
+      // that has not happened yet.
+      if (entries.isEmpty) {
+        if (!mounted) return;
+        // Show the "looking" state before going out, not after. A history pull
+        // across every followed channel is sequential and can take a while, and
+        // an unexplained blank screen for that long is the complaint this whole
+        // change is answering.
+        setState(() {
+          _entries = entries;
+          _fetching = true;
+        });
+        try {
+          // Both lists, deduped. This tab draws clips from everything cached, so
+          // limiting the fetch to Following would leave a For You-only channel's
+          // videos permanently missing from it.
+          final ids = {
+            ...await channels.channelIdsIn(ChannelList.following),
+            ...await channels.channelIdsIn(ChannelList.forYou),
+          }.toList();
+          if (ids.isNotEmpty) {
+            // Sequential, FLOOD_WAIT respected — same pass the feeds use.
+            await messages.refreshChannels(ids);
+            entries = await messages.videoPosts(limit: _pageSize);
+          }
+        } finally {
+          if (mounted) setState(() => _fetching = false);
+        }
+      }
+
+      debugPrint('shorts: ${entries.length} clips ready');
+      if (mounted) {
+        setState(() {
+          _entries = entries;
+          _reachedEnd = entries.length < _pageSize;
+        });
+      }
+    } catch (e, stack) {
+      debugPrint('shorts: load failed: $e\n$stack');
       if (mounted) setState(() => _error = e);
+    }
+  }
+
+  /// Appends the next page, keyed off the oldest clip already held.
+  ///
+  /// Keyset on `date`, like the feeds — an OFFSET would rescan from the top every
+  /// page and shift under the pager as new posts arrive.
+  Future<void> _loadMore() async {
+    final entries = _entries;
+    if (_loadingMore || _reachedEnd || entries == null || entries.isEmpty) {
+      return;
+    }
+    _loadingMore = true;
+
+    try {
+      final page = await AppScope.messagesOf(context).videoPosts(
+        limit: _pageSize,
+        beforeDate: entries.last.message.date,
+      );
+      if (!mounted) return;
+      setState(() {
+        _entries = [...entries, ...page];
+        _reachedEnd = page.length < _pageSize;
+      });
+    } catch (_) {
+      // Leave what is loaded playable; the next swipe retries.
+    } finally {
+      _loadingMore = false;
     }
   }
 
@@ -72,9 +167,12 @@ class _ShortsScreenState extends State<ShortsScreen>
       );
     }
     if (entries.isEmpty) {
-      return const _Message(
-        text: 'No videos cached yet.\n\n'
-            'Pull posts from Settings, or scroll a feed with video in it.',
+      return _Message(
+        text: _fetching
+            ? 'Looking for videos…'
+            : 'No videos in your channels yet.\n\n'
+                'Pull down on a feed to fetch newer posts.',
+        spinner: _fetching,
       );
     }
 
@@ -87,7 +185,10 @@ class _ShortsScreenState extends State<ShortsScreen>
         controller: _pages,
         scrollDirection: Axis.vertical,
         itemCount: entries.length,
-        onPageChanged: (index) => setState(() => _index = index),
+        onPageChanged: (index) {
+          setState(() => _index = index);
+          if (index >= entries.length - _prefetchThreshold) _loadMore();
+        },
         itemBuilder: (context, index) => _Short(
           entry: entries[index],
           // Only the visible page gets a player. The coordinator caps decoders
@@ -276,9 +377,13 @@ class _Stat extends StatelessWidget {
 }
 
 class _Message extends StatelessWidget {
-  const _Message({required this.text});
+  const _Message({required this.text, this.spinner = false});
 
   final String text;
+
+  /// Shown while a fetch is genuinely in flight, so an empty Shorts tab reads as
+  /// working rather than broken.
+  final bool spinner;
 
   @override
   Widget build(BuildContext context) {
@@ -290,13 +395,20 @@ class _Message extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const ScaleIn(
-                child: Icon(
-                  Icons.video_library_outlined,
-                  size: 44,
-                  color: Colors.white38,
+              if (spinner)
+                const SizedBox(
+                  height: 44,
+                  width: 44,
+                  child: CircularProgressIndicator(color: Colors.white38),
+                )
+              else
+                const ScaleIn(
+                  child: Icon(
+                    Icons.video_library_outlined,
+                    size: 44,
+                    color: Colors.white38,
+                  ),
                 ),
-              ),
               const SizedBox(height: 14),
               Text(
                 text,

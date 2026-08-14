@@ -153,6 +153,18 @@ class MessageRepository {
     Iterable<int> chatIds, {
     int perChannel = 60,
     void Function(int done, int total)? onProgress,
+  }) {
+    // Queued behind any refresh already in flight, for the same reason: one
+    // history pass on the wire at a time, whoever asked for it.
+    return _serialized(
+      () => _backfillPass(chatIds, perChannel: perChannel, onProgress: onProgress),
+    );
+  }
+
+  Future<int> _backfillPass(
+    Iterable<int> chatIds, {
+    required int perChannel,
+    void Function(int done, int total)? onProgress,
   }) async {
     final ids = chatIds.toList();
     var total = 0;
@@ -173,6 +185,35 @@ class MessageRepository {
     return total;
   }
 
+  /// Pulls new posts for every tracked channel, once per app launch.
+  ///
+  /// The feeds read a local database, so without this the app opens on whatever
+  /// was cached whenever it last ran — which is why fresh content used to need a
+  /// trip to Channels or Settings first.
+  ///
+  /// Guarded by [_syncedThisLaunch] rather than by a timestamp: the point is one
+  /// pass per launch, and a clock-based rule would fire again every time the
+  /// process is recreated after Android reaps it in the background.
+  ///
+  /// Nothing here changes the traffic profile — [refreshChannels] still walks
+  /// channels one at a time and sleeps out any FLOOD_WAIT in full. It is the same
+  /// work the pull-to-refresh gesture does, just no longer waiting to be asked.
+  Future<int> syncOnLaunch() async {
+    if (_syncedThisLaunch) return 0;
+    _syncedThisLaunch = true;
+
+    final rows = await _db.customSelect(
+      'SELECT DISTINCT chat_id FROM channel_lists',
+      readsFrom: {_db.channelLists},
+    ).get();
+    final ids = [for (final row in rows) row.read<int>('chat_id')];
+    if (ids.isEmpty) return 0;
+
+    return refreshChannels(ids);
+  }
+
+  var _syncedThisLaunch = false;
+
   /// Fetches only what is *newer* than what we already hold, for pull-to-refresh.
   ///
   /// Deliberately not a backfill: it walks forward from `last_synced_message_id`
@@ -184,6 +225,35 @@ class MessageRepository {
   Future<int> refreshChannels(
     Iterable<int> chatIds, {
     int perChannel = 30,
+    void Function(int done, int total)? onProgress,
+  }) {
+    return _serialized(
+      () => _refreshPass(chatIds, perChannel: perChannel, onProgress: onProgress),
+    );
+  }
+
+  /// Queues a history pass behind every pass already running.
+  ///
+  /// Each pass is internally sequential, but there is more than one caller now —
+  /// the launch sync, pull-to-refresh, and Shorts fetching on open — and two of
+  /// them overlapping would put concurrent `getChatHistory` calls on the wire.
+  /// That is the one thing the whole traffic design rules out, so the guarantee
+  /// has to hold across callers rather than only within one.
+  ///
+  /// The chain swallows errors when extending itself so that a failed pass does
+  /// not poison every pass queued behind it. The failure still reaches its own
+  /// caller through the returned future.
+  Future<T> _serialized<T>(Future<T> Function() body) {
+    final result = _passes.then((_) => body());
+    _passes = result.then((_) {}, onError: (_) {});
+    return result;
+  }
+
+  Future<void> _passes = Future<void>.value();
+
+  Future<int> _refreshPass(
+    Iterable<int> chatIds, {
+    required int perChannel,
     void Function(int done, int total)? onProgress,
   }) async {
     final ids = chatIds.toList();

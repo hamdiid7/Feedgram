@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:drift/drift.dart';
+import 'package:flutter/foundation.dart';
 import 'package:handy_tdlib/api.dart' as td;
 
 import '../telegram/td_exception.dart';
@@ -197,13 +198,16 @@ class ChannelRepository {
 
   /// Pulls every channel the account follows.
   ///
-  /// Two things about `loadChats` that are easy to get wrong:
+  /// Three things about `loadChats` that are easy to get wrong:
   ///
   /// 1. **Chats do not come back as a return value.** `loadChats` answers `Ok`
-  ///    and the actual chats arrive separately as `updateNewChat`, so the
-  ///    subscription below is the only thing that sees them.
+  ///    and the actual chats arrive separately as `updateNewChat`.
   /// 2. **Error 404 is the success condition**, meaning "no more chats". Any
   ///    other error is real.
+  /// 3. **`updateNewChat` is not a list of what exists**, it is a notification
+  ///    of what is new, delivered once per chat per session. Listening for it is
+  ///    necessary but not sufficient; `getChats` below is what makes the result
+  ///    the whole account rather than only the part TDLib had not seen yet.
   Future<int> syncSubscribedChannels() async {
     final discovered = <int, td.Chat>{};
 
@@ -214,22 +218,26 @@ class ChannelRepository {
     });
 
     try {
-      while (true) {
-        try {
-          await _client.send<td.Ok>(
-            td.LoadChats(chatList: const td.ChatListMain(), limit: 100),
-          );
-        } on TdException catch (e) {
-          if (e.code == 404) break;
+      // Archive as well as Main. A muted channel that was swiped away is still
+      // followed, and it does not appear in ChatListMain at all — walking only
+      // Main quietly returns fewer channels than the account actually has, with
+      // nothing to indicate any were skipped.
+      for (final list in const [td.ChatListMain(), td.ChatListArchive()]) {
+        while (true) {
+          try {
+            await _client.send<td.Ok>(td.LoadChats(chatList: list, limit: 100));
+          } on TdException catch (e) {
+            if (e.code == 404) break;
 
-          final flood = e.floodWait;
-          if (flood != null) {
-            // Sleep the full duration TDLib asked for, then resume where we
-            // left off. Shortening this is what gets accounts flagged.
-            await Future<void>.delayed(flood);
-            continue;
+            final flood = e.floodWait;
+            if (flood != null) {
+              // Sleep the full duration TDLib asked for, then resume where we
+              // left off. Shortening this is what gets accounts flagged.
+              await Future<void>.delayed(flood);
+              continue;
+            }
+            rethrow;
           }
-          rethrow;
         }
       }
 
@@ -240,12 +248,55 @@ class ChannelRepository {
       await subscription.cancel();
     }
 
-    final channels = discovered.values.where(_isChannel).toList();
+    // Ask for the ids outright, rather than trusting the update stream alone.
+    //
+    // `updateNewChat` fires once per chat per TDLib session. Any chat already
+    // loaded earlier in this run — by the Messages tab, which walks the same
+    // list, or by an earlier sync in the same process — is never announced
+    // again, so listening only sees whatever happens to be new. On a warm
+    // session that is a fraction of the account: this found 38 of 88 channels.
+    //
+    // `getChats` answers from what TDLib has loaded, which the pagination above
+    // has just made sure is everything.
+    final ids = <int>{...discovered.keys};
+    for (final list in const [td.ChatListMain(), td.ChatListArchive()]) {
+      try {
+        final chats = await _client.send<td.Chats>(
+          td.GetChats(chatList: list, limit: 1000),
+        );
+        ids.addAll(chats.chatIds);
+      } on TdException {
+        // One unreadable list must not discard the other.
+      }
+    }
+
+    final chats = <td.Chat>[];
+    for (final id in ids) {
+      final known = discovered[id];
+      if (known != null) {
+        chats.add(known);
+        continue;
+      }
+      try {
+        // Local cache, so this is cheap despite being one call per chat.
+        chats.add(await _client.send<td.Chat>(td.GetChat(chatId: id)));
+      } on TdException {
+        continue;
+      }
+    }
+
+    final channels = chats.where(_isChannel).toList();
+    debugPrint(
+      'sync: ${ids.length} chats known, ${chats.length} readable, '
+      '${channels.length} channels',
+    );
+
 
     // Sequential on purpose. getSupergroup is served from TDLib's local cache,
     // but keeping the whole sync single-file is the habit that matters once
     // Phase 4 starts pulling history.
     var saved = 0;
+    var failed = 0;
     for (final chat in channels) {
       final type = chat.type as td.ChatTypeSupergroup;
       try {
@@ -262,16 +313,28 @@ class ChannelRepository {
         // Subscriptions land in Following only, never For You.
         await addToList(chat.id, ChannelList.following);
         saved++;
-      } on TdException {
-        // One unreadable supergroup should not abort the pass.
+      } catch (e) {
+        // Anything, not just TdException. `channels.username` is UNIQUE, so a
+        // handle that has moved to a different chat id throws a *database*
+        // error here — and catching only TdException let that abort the entire
+        // pass at whichever channel happened to collide, silently capping how
+        // many were ever saved.
+        failed++;
+        // Id only. Titles are the user's data and this goes to the device log.
+        debugPrint('sync: skipped channel ${chat.id}: $e');
         continue;
       }
     }
+    debugPrint('sync: saved $saved, skipped $failed');
 
     // Verify what is already tracked while TDLib is warm. Cheap (getChat is
     // served from local cache) and it is the only place that can tell a group
     // from a channel.
-    await purgeNonChannels();
+    final purged = await purgeNonChannels();
+    debugPrint(
+      'sync: purge dropped ${purged.length}, '
+      'db holds ${await countChannels()} channels',
+    );
 
     return saved;
   }

@@ -57,12 +57,17 @@ class ChatRepository {
   /// for. One `getChat` each, so this is the worst-case round-trip count.
   static const _maxScan = 120;
 
-  /// One-to-one chats, most recent first. Nothing else.
+  /// One-to-one chats with people, most recent first. Nothing else.
   ///
   /// Private chats only — no channels, no supergroups, no basic groups. This
   /// account follows enough channels that they buried the handful of real
   /// conversations, and groups did the same on a smaller scale. Channels already
   /// have two whole tabs of their own.
+  ///
+  /// Bots are excluded as well. They are private chats technically, but a
+  /// download bot or a search bot is a tool you issue commands to, not someone
+  /// you have a conversation with — and on this account they outnumber the
+  /// people.
   ///
   /// Secret chats are excluded too: they are bound to the device that created
   /// them, so surfacing them from a second client mostly produces rows that
@@ -105,7 +110,9 @@ class ChatRepository {
         // Whitelist rather than a list of exclusions: TDLib gains chat types
         // over time, and "everything except the three I thought of" would let a
         // new one back into a list that is supposed to be people.
-        if (chat.type is! td.ChatTypePrivate) continue;
+        final type = chat.type;
+        if (type is! td.ChatTypePrivate) continue;
+        if (await _isBot(type.userId)) continue;
 
         summaries.add(ChatSummary(
           id: chat.id,
@@ -121,6 +128,29 @@ class ChatRepository {
     }
 
     return summaries;
+  }
+
+  /// Whether a user id belongs to a bot.
+  ///
+  /// Cached for the life of the repository: the answer never changes for a given
+  /// id, and without this every reload of the list would re-ask about the same
+  /// accounts.
+  final _botCache = <int, bool>{};
+
+  Future<bool> _isBot(int userId) async {
+    final known = _botCache[userId];
+    if (known != null) return known;
+
+    try {
+      final user = await _client.send<td.User>(td.GetUser(userId: userId));
+      final isBot = user.type is td.UserTypeBot;
+      _botCache[userId] = isBot;
+      return isBot;
+    } catch (_) {
+      // Unknown means keep it: dropping a chat because one lookup failed is
+      // worse than showing one bot.
+      return false;
+    }
   }
 
   /// Newest messages in a chat, oldest first so the list reads top to bottom.

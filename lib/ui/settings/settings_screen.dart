@@ -28,7 +28,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   StorageUsage? _usage;
   var _started = false;
   var _clearing = false;
-  var _backfilling = false;
   String? _notice;
 
   @override
@@ -73,26 +72,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (mounted) setState(() => _notice = 'Could not clear: $e');
     } finally {
       if (mounted) setState(() => _clearing = false);
-    }
-  }
-
-  Future<void> _backfill() async {
-    setState(() {
-      _backfilling = true;
-      _notice = 'Starting…';
-    });
-    try {
-      final total = await AppScope.messagesOf(context).backfillAll(
-        perChannel: 40,
-        onProgress: (done, all) {
-          if (mounted) setState(() => _notice = 'Channel $done of $all');
-        },
-      );
-      if (mounted) setState(() => _notice = 'Pulled $total posts.');
-    } catch (e) {
-      if (mounted) setState(() => _notice = 'Backfill failed: $e');
-    } finally {
-      if (mounted) setState(() => _backfilling = false);
     }
   }
 
@@ -226,19 +205,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onTap: () => Navigator.of(context).push(
                   MaterialPageRoute(builder: (_) => const ChannelsScreen()),
                 ),
-              ),
-              ListTile(
-                leading: const Icon(Icons.download_outlined),
-                title: const Text('Pull recent posts'),
-                subtitle: const Text('Fetches history for every tracked channel'),
-                trailing: _backfilling
-                    ? const SizedBox(
-                        height: 18,
-                        width: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : null,
-                onTap: _backfilling ? null : _backfill,
               ),
             ],
           ),

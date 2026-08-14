@@ -37,23 +37,50 @@ android {
     }
 }
 
-// Strip non-arm64 native libs from **release** only.
+// Keep only the ABI actually being built for.
 //
-// `--target-platform android-arm64` filters Flutter's own libs but NOT a
-// plugin's prebuilt jniLibs, and handy_tdlib ships four ABIs — without this the
-// release APK carries ~30 MB of libtdjson/libssl/libcrypto it can never load
-// (74 MB -> 37 MB). `defaultConfig.ndk.abiFilters` does not work for this: the
-// Flutter Gradle plugin sets abiFilters per variant and wins.
+// `--target-platform` filters Flutter's own libs but NOT a plugin's prebuilt
+// jniLibs, and handy_tdlib ships four ABIs of libtdjson/libssl/libcrypto at
+// ~30 MB each. Without this the APK carries three sets it can never load.
+// `defaultConfig.ndk.abiFilters` does not work for this: the Flutter Gradle
+// plugin sets abiFilters per variant and wins.
 //
-// Debug keeps every ABI on purpose. The pattern matches Flutter's libflutter.so
-// and libapp.so too, so excluding x86_64 globally leaves an x86_64 emulator with
-// no engine at all, not just no TDLib.
+// This follows `--target-platform` rather than hardcoding arm64 for release. A
+// fixed exclusion list is a trap in both directions: these patterns match
+// Flutter's own libflutter.so and libapp.so too, so stripping x86_64 from a
+// build meant for an emulator leaves it with no engine at all, and stripping
+// nothing from debug produced a 228 MB APK that would not fit on the emulator's
+// /data partition.
+val ALL_ABIS = listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+
+fun abiFor(platform: String): String? = when (platform) {
+    "android-arm" -> "armeabi-v7a"
+    "android-arm64" -> "arm64-v8a"
+    "android-x86" -> "x86"
+    "android-x64" -> "x86_64"
+    else -> null
+}
+
+// Flutter passes `-Ptarget-platform=...` through to Gradle for every build.
+val requestedAbis: Set<String> = (project.findProperty("target-platform") as String?)
+    ?.split(",")
+    ?.mapNotNull { abiFor(it.trim()) }
+    ?.toSet()
+    .orEmpty()
+
 androidComponents {
-    onVariants(selector().withBuildType("release")) { variant ->
+    onVariants { variant ->
+        // Fallbacks matter: if that property ever stops being passed, release
+        // still ships arm64 for the phone and debug still ships everything,
+        // which is exactly the behaviour this replaced. A wrong guess here is a
+        // crash on launch, so absent information means strip nothing.
+        val keep = when {
+            requestedAbis.isNotEmpty() -> requestedAbis
+            variant.buildType == "release" -> setOf("arm64-v8a")
+            else -> ALL_ABIS.toSet()
+        }
         variant.packaging.jniLibs.excludes.addAll(
-            "lib/armeabi-v7a/**",
-            "lib/x86/**",
-            "lib/x86_64/**",
+            ALL_ABIS.filterNot { it in keep }.map { "lib/$it/**" },
         )
     }
 }

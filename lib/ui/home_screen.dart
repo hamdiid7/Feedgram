@@ -39,6 +39,14 @@ class _HomeScreenState extends State<HomeScreen> {
   /// say — has no business switching feeds at all.
   var _dragging = false;
 
+  /// True while the page view is moving between feeds.
+  ///
+  /// The header's position is shared by both feeds, so a swipe must not disturb
+  /// it. Without this the incoming feed announces itself at offset zero, the
+  /// "back at the top" rule below fires, and the header springs back down —
+  /// which reads as the header reappearing for no reason mid-swipe.
+  var _switchingFeed = false;
+
   /// How much of the header is currently pushed off the top, in pixels.
   ///
   /// Tracks the scroll one-to-one rather than flipping between shown and hidden:
@@ -75,6 +83,9 @@ class _HomeScreenState extends State<HomeScreen> {
   void _select(ChannelList list) {
     final index = feedOrder.indexOf(list);
     if (index == _tabIndex) return;
+    // Same reasoning as a swipe: the tap-driven move must not let the incoming
+    // feed reset the header either.
+    _switchingFeed = true;
     setState(() => _tabIndex = index);
     _pages.animateToPage(
       index,
@@ -89,16 +100,30 @@ class _HomeScreenState extends State<HomeScreen> {
     if (notification.depth == 0) {
       if (notification is ScrollStartNotification) {
         _dragging = notification.dragDetails != null;
+        _switchingFeed = true;
       } else if (notification is ScrollEndNotification) {
         // Cleared here too: a drag that ends back on the page it started from
         // never fires onPageChanged, and leaving the flag set would let the
         // next programmatic move be mistaken for a swipe.
         _dragging = false;
+        _switchingFeed = false;
       }
       return false;
     }
 
     if (notification.metrics.axis != Axis.vertical) return false;
+
+    // A fresh vertical drag means the reader is scrolling, whatever the page
+    // view was doing. Clearing here rather than trusting the horizontal
+    // ScrollEnd: a page settle is a second start/end pair after the drag, and a
+    // missing end notification would leave this stuck true and the header frozen.
+    if (notification is ScrollStartNotification &&
+        notification.dragDetails != null) {
+      _switchingFeed = false;
+    }
+
+    // A feed arriving or leaving during a swipe is not the reader scrolling it.
+    if (_switchingFeed) return false;
 
     if (notification is ScrollUpdateNotification) {
       final delta = notification.scrollDelta ?? 0;
